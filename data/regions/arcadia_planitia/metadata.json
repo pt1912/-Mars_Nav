@@ -1,0 +1,27 @@
+{
+    "region": "Arcadia Planitia",
+    "planet": "Mars",
+    "source": "NASA MGS MOLA MEGDR",
+    "source_file": "megt88n180hb.img",
+    "instrument": "Mars Orbiter Laser Altimeter",
+    "resolution_pixels_per_degree": 128,
+    "elevation_unit": "meters",
+    "longitude_convention": "0-360 east",
+    "latitude_orientation": "north_to_south",
+    "bounds": {
+        "latitude_min": 44.5079794,
+        "latitude_max": 47.8921384,
+        "longitude_min": 186.354857,
+        "longitude_max": 191.2451392
+    },
+    "raster_bounds": {
+        "latitude_min": 44.5078125,
+        "latitude_max": 47.8984375,
+        "longitude_min": 186.3515625,
+        "longitude_max": 191.25
+    },
+    "shape": {
+        "rows": 434,
+        "columns": 627
+    }
+}

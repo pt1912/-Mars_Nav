@@ -1,0 +1,24 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# VS Code
+.vscode/
+
+# NASA original datasets
+data/raw/
+
+# Temporary processing files
+data/processed/
+
+# Credentials
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Temporary files
+*.log
+.DS_Store

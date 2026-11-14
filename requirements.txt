@@ -1,0 +1,23 @@
+# Interfaz web
+streamlit
+streamlit-folium
+folium
+
+# Procesamiento de datos
+numpy
+pandas
+scipy
+
+# Datos geoespaciales
+rasterio
+pyproj
+
+# Planificación de trayectorias
+networkx
+
+# Visualización científica
+plotly
+matplotlib
+
+# Descarga de datos NASA
+requests
