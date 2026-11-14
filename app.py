@@ -4,6 +4,7 @@ import folium
 from streamlit_folium import st_folium
 from modules.nasa_maps import get_arcadia_wmts
 from modules.mars_geometry import mars_distance
+from modules.slope_overlay import get_slope_overlay
 
 
 # ==========================================
@@ -109,6 +110,11 @@ with st.sidebar:
 
     mola = st.checkbox(
     "MOLA Topographic Relief",
+    value=False
+    )
+
+    show_slope = st.checkbox(
+    "Terrain Slope Analysis",
     value=False
     )
 
@@ -254,6 +260,29 @@ with col_map:
                 opacity=0.65,
                 no_wrap=True
             ).add_to(mars_map)
+        # ==========================================
+        # TERRAIN SLOPE ANALYSIS
+        # ==========================================
+
+        if show_slope:
+
+            slope_image, slope_bounds, slope_stats = (
+                get_slope_overlay()
+            )
+
+            folium.raster_layers.ImageOverlay(
+                image=slope_image,
+                bounds=slope_bounds,
+                name="Mars_Nav Terrain Slope",
+                opacity=0.75,
+                overlay=True,
+                control=True,
+                show=True,
+                origin="upper",
+                interactive=False,
+                zindex=2
+            ).add_to(mars_map)
+
         # ==================================
         # CTX COVERAGE
         # ==================================
@@ -575,6 +604,46 @@ with col_info:
         "Direct distance assumes a spherical Mars. "
         "Terrain elevation and obstacles are not included."
     )
+
+    # ==========================================
+    # REGIONAL TERRAIN ANALYSIS
+    # ==========================================
+
+    st.divider()
+
+    st.subheader("Regional Terrain Analysis")
+
+    if show_slope:
+
+        _, _, stats = get_slope_overlay()
+
+        st.metric(
+            "Maximum Regional Slope",
+            f"{stats['max_slope']:.2f}°"
+        )
+
+        st.metric(
+            "Average Regional Slope",
+            f"{stats['mean_slope']:.2f}°"
+        )
+
+        st.metric(
+            "Elevation Range",
+            f"{stats['min_elevation']:.0f} "
+            f"to {stats['max_elevation']:.0f} m"
+        )
+
+        st.caption(
+            "Source: NASA MGS MOLA. "
+            "Regional terrain analysis."
+        )
+
+    else:
+
+        st.info(
+            "Enable Terrain Slope Analysis "
+            "to display regional terrain statistics."
+        )
 
 
 # ==========================================
