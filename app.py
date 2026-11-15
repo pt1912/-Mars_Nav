@@ -54,8 +54,6 @@ if "map_zoom" not in st.session_state:
 for key, default in (
     ("eva_start", None),
     ("eva_destination", None),
-    ("eva_start_option", None),
-    ("eva_destination_option", None),
     ("eva_click_mode", "Browse"),
     ("eva_catalog", {}),
     ("eva_last_marker_count", None),
@@ -69,8 +67,6 @@ def reset_eva_waypoints():
     """Do not carry start/end coordinates into another study region."""
     st.session_state.eva_start = None
     st.session_state.eva_destination = None
-    st.session_state.eva_start_option = None
-    st.session_state.eva_destination_option = None
     st.session_state.eva_click_mode = "Browse"
     st.session_state.eva_catalog = {}
 
@@ -97,16 +93,8 @@ def on_global_map():
     navigate_to(None)
 
 
-def on_eva_point_change(role):
-    """Assign a waypoint selected in the two dropdowns below the map."""
-    selected = st.session_state.get(f"eva_{role}_option")
-    entry = st.session_state.eva_catalog.get(selected)
-    st.session_state[f"eva_{role}"] = dict(entry) if entry else None
-
-
 def clear_eva_point(role):
     st.session_state[f"eva_{role}"] = None
-    st.session_state[f"eva_{role}_option"] = None
 
 
 def on_marker_click():
@@ -131,7 +119,6 @@ def on_marker_click():
             st.session_state.eva_catalog, event, SITES,
         )
         st.session_state[f"eva_{role}"] = waypoint
-        st.session_state[f"eva_{role}_option"] = None
         # Return to normal navigation after selecting one point.
         st.session_state.eva_click_mode = "Browse"
         return
@@ -272,7 +259,7 @@ if search_enabled:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             st.sidebar.warning(f"SWIM {depth} target search unavailable: {exc}")
 
-# This catalog is shared by the callbacks for map clicks and dropdowns.
+# The catalog resolves scientific marker clicks to their exact coordinates.
 # SWIM entries appear only when their corresponding ice overlay is enabled.
 if st.session_state.region_selector is not None:
     st.session_state.eva_catalog = build_waypoint_catalog(
@@ -280,13 +267,6 @@ if st.session_state.region_selector is not None:
     )
 else:
     st.session_state.eva_catalog = {}
-
-# Keep already selected coordinates, but clear any dropdown entry no longer
-# present after changing SWIM depth, threshold or maximum targets.
-for role in ("start", "destination"):
-    key = f"eva_{role}_option"
-    if st.session_state[key] not in st.session_state.eva_catalog:
-        st.session_state[key] = None
 
 map_col, info_col = st.columns([3.6, 1], gap="medium")
 
@@ -369,55 +349,45 @@ with map_col:
                  "The map returns to Browse after one selection.",
         )
 
+        # Coordinates are chosen exclusively by clicking the map while
+        # Set start or Set destination is active. No dropdowns are needed.
         start_col, end_col = st.columns(2, gap="medium")
-        catalog = st.session_state.eva_catalog
-        choices = [None, *catalog.keys()]
+        start = st.session_state.eva_start
+        destination = st.session_state.eva_destination
 
         with start_col:
             st.markdown("**Start point**")
-            st.selectbox(
-                "Choose start marker",
-                options=choices,
-                format_func=lambda code: catalog[code]["label"] if code else "Select an available marker",
-                key="eva_start_option",
-                on_change=on_eva_point_change,
-                args=("start",),
-            )
-            start = st.session_state.eva_start
-            if start:
-                st.success(
-                    f'{start["label"]}\n\n'
-                    f'Lat {start["lat"]:.5f}° · Lon {start["lon"]:.5f}°'
+            if start is None:
+                st.caption("Latitude: —  ·  Longitude: —")
+                st.caption("Select Set start, then click the map or a marker.")
+            else:
+                st.info(
+                    f'Latitude: {start["lat"]:.5f}°\n\n'
+                    f'Longitude: {start["lon"]:.5f}°'
                 )
                 st.button(
-                    "Clear start", key="eva_clear_start",
-                    on_click=clear_eva_point, args=("start",),
+                    "Clear start",
+                    key="eva_clear_start",
+                    on_click=clear_eva_point,
+                    args=("start",),
                 )
-            else:
-                st.caption("No start point selected.")
 
         with end_col:
             st.markdown("**Destination**")
-            st.selectbox(
-                "Choose destination marker",
-                options=choices,
-                format_func=lambda code: catalog[code]["label"] if code else "Select an available marker",
-                key="eva_destination_option",
-                on_change=on_eva_point_change,
-                args=("destination",),
-            )
-            destination = st.session_state.eva_destination
-            if destination:
-                st.success(
-                    f'{destination["label"]}\n\n'
-                    f'Lat {destination["lat"]:.5f}° · Lon {destination["lon"]:.5f}°'
+            if destination is None:
+                st.caption("Latitude: —  ·  Longitude: —")
+                st.caption("Select Set destination, then click the map or a marker.")
+            else:
+                st.info(
+                    f'Latitude: {destination["lat"]:.5f}°\n\n'
+                    f'Longitude: {destination["lon"]:.5f}°'
                 )
                 st.button(
-                    "Clear destination", key="eva_clear_destination",
-                    on_click=clear_eva_point, args=("destination",),
+                    "Clear destination",
+                    key="eva_clear_destination",
+                    on_click=clear_eva_point,
+                    args=("destination",),
                 )
-            else:
-                st.caption("No destination selected.")
 
         if start is not None and destination is not None:
             distance = straight_line_distance_km(start, destination)
@@ -426,9 +396,8 @@ with map_col:
             else:
                 st.metric("Straight-line distance (reference)", f"{distance:.2f} km")
                 st.caption(
-                    "Great-circle distance only. No route has been calculated; "
-                    "slopes, surface hazards, elevation and EVA constraints "
-                    "have not been evaluated."
+                    "The dashed line is a visual connection, not an optimized "
+                    "or terrain-safe EVA route."
                 )
 
 with info_col:

@@ -27,7 +27,7 @@ def _coordinates(lat, lon):
 
 
 def build_waypoint_catalog(site, search_results):
-    """Offer the selected region marker and currently visible SWIM candidates."""
+    """Catalog of clickable region and SWIM markers, for exact coordinates."""
     catalog = {
         "region": {
             "lat": float(site["lat"]),
@@ -158,6 +158,23 @@ def straight_line_distance_km(start, end):
 def create_waypoint_markers(start, destination):
     """Add Start and Destination on top of research candidates."""
     group = folium.FeatureGroup(name="EVA Start and Destination", control=False)
+
+    # Show a dashed *visual reference*, NOT a computed or safe EVA route.
+    # Add the line before waypoints so the markers remain clearly visible.
+    if start is not None and destination is not None:
+        a_lat, a_lon = _coordinates(start["lat"], start["lon"])
+        b_lat, b_lon = _coordinates(destination["lat"], destination["lon"])
+        if (a_lat, a_lon) != (b_lat, b_lon):
+            folium.PolyLine(
+                locations=[[a_lat, a_lon], [b_lat, b_lon]],
+                color="#E8EDF2",
+                weight=3,
+                opacity=0.95,
+                dash_array="2, 8",
+                line_cap="round",
+                interactive=False,
+            ).add_to(group)
+
     for role, point, color in (
         ("START", start, "#34D399"),
         ("DESTINATION", destination, "#FB7185"),
