@@ -1,0 +1,68 @@
+[
+  {
+    "id": "arcadia",
+    "name": "Arcadia Planitia",
+    "lat": 46.2,
+    "lon": -171.2,
+    "category": "Subsurface ice",
+    "priority": "Primary study region",
+    "summary": "Northern mid-latitude plains with geomorphological and orbital evidence consistent with shallow subsurface water ice.",
+    "reference_note": "Representative coordinate within the Arcadia CTX coverage.",
+    "focus": "SWIM4MIM ice consistency, MOLA elevation, MRO CTX imagery, terrain risk assessment and EVA path optimization."
+  },
+  {
+    "id": "utopia",
+    "name": "Utopia Planitia",
+    "lat": 46.7,
+    "lon": 117.5,
+    "category": "Subsurface ice",
+    "priority": "Comparative study region",
+    "summary": "Large northern impact basin exhibiting landforms and orbital signatures associated with subsurface ice and periglacial processes.",
+    "reference_note": "Representative coordinate within the regional basin.",
+    "focus": "Subsurface ice distribution, geological context and comparative analysis of potential exploration zones."
+  },
+  {
+    "id": "jezero",
+    "name": "Jezero Crater",
+    "lat": 18.38,
+    "lon": 77.58,
+    "category": "Robotic exploration",
+    "priority": "Mission reference",
+    "summary": "Ancient lacustrine basin containing a preserved river delta, investigated by NASA's Perseverance rover for evidence of past habitable environments.",
+    "reference_note": "Approximate crater location.",
+    "focus": "Sedimentary stratigraphy, delta geomorphology, rover navigation and surface traverse analysis."
+  },
+  {
+    "id": "gale",
+    "name": "Gale Crater",
+    "lat": -5.4,
+    "lon": 137.8,
+    "category": "Robotic exploration",
+    "priority": "Mission reference",
+    "summary": "Impact crater containing Mount Sharp, where NASA's Curiosity rover investigates sedimentary sequences and the geological evolution of Mars.",
+    "reference_note": "Representative crater coordinate.",
+    "focus": "Mineralogy, sedimentary geology, paleoenvironmental reconstruction and robotic surface mobility."
+  },
+  {
+    "id": "valles",
+    "name": "Valles Marineris",
+    "lat": -14.0,
+    "lon": -59.0,
+    "category": "Terrain and geology",
+    "priority": "Terrain reference",
+    "summary": "Extensive canyon system characterized by significant elevation differences, steep escarpments and complex geological structures.",
+    "reference_note": "Representative coordinate within the canyon system.",
+    "focus": "Digital elevation analysis, slope constraints, terrain accessibility and geological hazards."
+  },
+  {
+    "id": "olympus",
+    "name": "Olympus Mons",
+    "lat": 18.65,
+    "lon": -133.8,
+    "category": "Terrain and geology",
+    "priority": "Geologic reference",
+    "summary": "Large Martian shield volcano with extensive lava flows, volcanic escarpments and major regional elevation contrasts.",
+    "reference_note": "Approximate volcanic edifice location.",
+    "focus": "Volcanic geomorphology, elevation gradients, surface morphology and regional topographic analysis."
+  }
+]

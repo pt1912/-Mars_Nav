@@ -1,1001 +1,452 @@
-import streamlit as st
+import html
+import json
+import re
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.request import Request, urlopen
+
 import folium
-
+import streamlit as st
 from streamlit_folium import st_folium
-from modules.nasa_maps import get_arcadia_wmts
-from modules.mars_geometry import mars_distance
-from modules.slope_overlay import get_slope_overlay
-from modules.path_planning import plan_route_from_points
-from modules.scientific_targets import load_swim_pois
-from modules.swim_heatmap import get_swim_heatmap
 
+from modules.swim_global import load_swim_global
+from modules.ice_targets import find_ice_candidates
+from modules.usgs_overlay import USGSGeologyOverlay
 
-# ==========================================
-# PAGE CONFIGURATION
-# ==========================================
+BASE_DIR = Path(__file__).resolve().parent
+SITES_FILE = BASE_DIR / "data" / "locations" / "mars_sites.json"
+
+NASA_TREK_ROOT = "https://trek.nasa.gov/tiles/Mars/EQ"
+VIKING_WMTS = (
+    f"{NASA_TREK_ROOT}/Mars_Viking_MDIM21_ClrMosaic_global_232m/"
+    "1.0.0/default/default028mm/{z}/{y}/{x}.jpg"
+)
+MOLA_WMTS = (
+    f"{NASA_TREK_ROOT}/Mars_MGS_MOLA_ClrShade_merge_global_463m/"
+    "1.0.0/default/default028mm/{z}/{y}/{x}.jpg"
+)
+
+CTX_GLOBAL_ID = "CTX_beta01_uncontrolled_5m_Caltech"
+CTX_REGIONAL_IDS = {
+    "arcadia": "Arcadia_Planitia_CTX_BlockAdj_dd",
+    "jezero": "JEZ_ctx_B_soc_008_orthoMosaic_6m_Eqc_latTs0_lon0",
+    "gale": "Gale_CTX_BlockAdj_dd",
+    "olympus": "olympus_mons.eq",
+}
+
+GLOBAL_ID = "global"
+GLOBAL_CENTER = (0.0, 0.0)
+GLOBAL_ZOOM = 1
+REGION_ZOOM = 5
+
+CATEGORY_COLORS = {
+    "Subsurface ice": "#38bdf8",
+    "Robotic exploration": "#22C55E",
+    "Terrain and geology": "#fb923c",
+}
+POI_COLORS = {"Ci_0_1": "#E879F9", "Ci_1_5": "#FDE047"}
 
 st.set_page_config(
-    page_title="Mars_Nav",
-    page_icon="🚀",
+    page_title="ARCADIA ICE EXPLORER",
+    page_icon="🪐",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
-# ==========================================
-# NASA MAP CONFIGURATION
-# ==========================================
+@st.cache_data(show_spinner=False)
+def load_sites():
+    if not SITES_FILE.is_file():
+        raise FileNotFoundError(f"Site catalog not found: {SITES_FILE}")
+    entries = json.loads(SITES_FILE.read_text(encoding="utf-8"))
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("The site catalog must be a non-empty JSON array.")
 
-MARS_GLOBAL_URL = (
-    "https://trek.nasa.gov/tiles/Mars/EQ/"
-    "Mars_Viking_MDIM21_ClrMosaic_global_232m/"
-    "1.0.0/default/default028mm/"
-    "{z}/{y}/{x}.jpg"
-)
-
-# NASA MOLA Global Color Hillshade
-
-MOLA_URL = (
-    "https://trek.nasa.gov/tiles/Mars/EQ/"
-    "Mars_MGS_MOLA_ClrShade_merge_global_463m/"
-    "1.0.0/default/default028mm/"
-    "{z}/{y}/{x}.jpg"
-)
-
-ARCADIA_BOUNDS = [
-    [44.5079794, -173.645143],
-    [47.8921384, -168.7548608]
-]
-
-ARCADIA_CENTER = [46.2, -171.2]
+    sites = {}
+    required = ("id", "name", "lat", "lon", "category", "summary", "focus")
+    for item in entries:
+        if not all(k in item for k in required):
+            raise ValueError(f"Invalid catalog entry: {item!r}")
+        site = dict(item)
+        site_id = str(site["id"])
+        if site_id in sites or site_id == GLOBAL_ID:
+            raise ValueError(f"Duplicate or reserved site ID: {site_id}")
+        site["lat"] = float(site["lat"])
+        site["lon"] = float(site["lon"])
+        if not (-90 <= site["lat"] <= 90 and -180 <= site["lon"] <= 180):
+            raise ValueError(f"Invalid coordinates for {site_id}")
+        sites[site_id] = site
+    return sites
 
 
-# ==========================================
-# SESSION STATE
-# ==========================================
-
-if "start_point" not in st.session_state:
-    st.session_state.start_point = None
-
-if "destination" not in st.session_state:
-    st.session_state.destination = None
-
-if "last_processed_click" not in st.session_state:
-    st.session_state.last_processed_click = None
-
-# Keep computed routes across Streamlit reruns.
-if "planned_route" not in st.session_state:
-    st.session_state.planned_route = None
-if "route_signature" not in st.session_state:
-    st.session_state.route_signature = None
-if "route_error" not in st.session_state:
-    st.session_state.route_error = None
-
-# Persist the Leaflet viewport and allow reusing a clicked location.
-if "map_center" not in st.session_state:
-    st.session_state.map_center = list(ARCADIA_CENTER)
-if "map_zoom" not in st.session_state:
-    st.session_state.map_zoom = 8
-if "last_map_point" not in st.session_state:
-    st.session_state.last_map_point = None
-if "last_swim_marker_click_count" not in st.session_state:
-    st.session_state.last_swim_marker_click_count = 0
-
-# A clicked SWIM marker becomes the selected sidebar target on the NEXT rerun.
-# This avoids modifying an existing Streamlit widget after it was instantiated.
-pending_swim = st.session_state.pop("pending_swim_choice", None)
-if pending_swim:
-    st.session_state["swim_target_selector"] = pending_swim
-
-
-def set_waypoint(which, point):
-    lat, lon = float(point["lat"]), float(point["lon"])
-    if not (ARCADIA_BOUNDS[0][0] <= lat <= ARCADIA_BOUNDS[1][0]
-            and ARCADIA_BOUNDS[0][1] <= lon <= ARCADIA_BOUNDS[1][1]):
-        raise ValueError("El punto está fuera de Arcadia CTX.")
-    if which not in ("start_point", "destination"):
-        raise ValueError("Tipo de marcador no reconocido.")
-    st.session_state[which] = {"lat": lat, "lon": lon}
-    st.session_state.planned_route = None
-    st.session_state.route_signature = None
-    st.session_state.route_error = None
-
-
-# ==========================================
-# HEADER
-# ==========================================
-
-st.title("🚀 Mars_Nav")
-
-st.subheader(
-    "Martian Surface Exploration & Path Planning System"
-)
-
-st.markdown(
-    "**NASA Space Apps Challenge 2026 | Arcadia Planitia**"
-)
-
-st.divider()
-
-
-# ==========================================
-# SIDEBAR - MISSION CONTROL
-# ==========================================
-
-with st.sidebar:
-
-    st.header("Mission Control")
-
-    st.subheader("Exploration Region")
-
-    st.selectbox(
-        "Region",
-        ["Arcadia Planitia"]
-    )
-
-    st.divider()
-
-    # Scientific layers
-    st.subheader("Scientific Layers")
-
-    optical = st.checkbox(
-        "CTX Optical Imagery",
-        value=True
-    )
-
-    show_bounds = st.checkbox(
-        "Show CTX Coverage",
-        value=False
-    )
-
-    mola = st.checkbox(
-    "MOLA Topographic Relief",
-    value=False
-    )
-
-    show_slope = st.checkbox(
-    "Terrain Slope Analysis",
-    value=False
-    )
-
-    show_swim = st.checkbox(
-        "SWIM — Ice Consistency Heatmap (0–1 m)",
-        value=False
-    )
-    swim_opacity = 0.70
-    if show_swim:
-        swim_opacity = st.slider(
-            "SWIM layer opacity", min_value=0.20, max_value=1.00,
-            value=0.70, step=0.05
-        )
-    show_ice_pois = st.checkbox(
-        "Show SWIM research points", value=True,
-        disabled=not show_swim
-    ) and show_swim
-
-    st.divider()
-
-    # Waypoint selection
-    st.subheader("Waypoint Selection")
-
-    selection_mode = st.radio(
-        "Select Point",
-        ["Start Point", "Destination"],
-        horizontal=False
-    )
-
-    st.caption(
-        "Click the map to set the selected waypoint. "
-        "You can also reassign the most recently clicked location:"
-    )
-    if st.session_state.last_map_point is not None:
-        p = st.session_state.last_map_point
-        st.caption(f"Selected: {p['lat']:.5f}°, {p['lon']:.5f}°")
-        last_col_start, last_col_end = st.columns(2)
-        with last_col_start:
-            if st.button("Use as Start", key="clicked_as_start", use_container_width=True):
-                set_waypoint("start_point", p)
-                st.rerun()
-        with last_col_end:
-            if st.button("Use as Destination", key="clicked_as_dest", use_container_width=True):
-                set_waypoint("destination", p)
-                st.rerun()
-
-    if show_swim:
-        st.markdown("**Scientific target selection**")
-        try:
-            swim_poi_catalog = load_swim_pois()
-        except (FileNotFoundError, ValueError) as error:
-            st.warning(f"SWIM POIs: {error}")
-            swim_poi_catalog = None
-        if swim_poi_catalog and swim_poi_catalog["points"]:
-            poi_lookup = {p["id"]: p for p in swim_poi_catalog["points"]}
-            existing = st.session_state.get("swim_target_selector")
-            if existing not in poi_lookup:
-                st.session_state["swim_target_selector"] = next(iter(poi_lookup))
-            target_id = st.selectbox(
-                "Choose a SWIM point or click its marker on the map",
-                options=list(poi_lookup),
-                format_func=lambda v: f"{v} · Ci={poi_lookup[v]['consistency']:.2f}",
-                key="swim_target_selector",
-            )
-            target = poi_lookup[target_id]
-            st.caption(f"{target['lat']:.4f}° N, {target['lon']:.4f}° · Ci={target['consistency']:.2f}")
-            poi_col_start, poi_col_end = st.columns(2)
-            with poi_col_start:
-                if st.button("POI → Start", key="poi_to_start", use_container_width=True):
-                    set_waypoint("start_point", target)
-                    st.rerun()
-            with poi_col_end:
-                if st.button("POI → Destination", key="poi_to_dest", use_container_width=True):
-                    set_waypoint("destination", target)
-                    st.rerun()
-            st.caption("Ci es consistencia de hielo, no una probabilidad.")
-
-    if st.button(
-        "Clear Points",
-        use_container_width=True
-    ):
-        st.session_state.start_point = None
-        st.session_state.destination = None
-        st.session_state.planned_route = None
-        st.session_state.route_signature = None
-        st.session_state.route_error = None
-        st.session_state.last_map_point = None
-        st.session_state.last_processed_click = None
-        st.rerun()
-
-    if st.button("Reset Map View", use_container_width=True):
-        st.session_state.map_center = list(ARCADIA_CENTER)
-        st.session_state.map_zoom = 8
-        st.rerun()
-
-    st.divider()
-
-    # Path planning
-    st.subheader("Path Planning")
-
-    algorithm = st.selectbox(
-        "Algorithm",
-        ["A*", "Dijkstra"]
-    )
-
-    exploration_mode = st.selectbox(
-        "Exploration Mode",
-        ["Astronaut", "Rover"]
-    )
-
-    max_slope_deg = st.slider(
-        "Max slope (experimental, degrees)",
-        min_value=0.5,
-        max_value=20.0,
-        value=15.0,
-        step=0.5,
-    )
-
-    slope_weight = st.slider(
-        "Slope cost penalty",
-        min_value=0.0,
-        max_value=10.0,
-        value=2.0,
-        step=0.5,
-    )
-
-    st.caption(
-        "Slope thresholds are experimental, not EVA safety limits. "
-        "Astronaut/Rover does not yet change mobility parameters."
-    )
-
-    calculate_route_clicked = st.button(
-        "Calculate Route",
-        disabled=(
-            st.session_state.start_point is None
-            or st.session_state.destination is None
-        ),
-        type="primary",
-        use_container_width=True,
-    )
-
-
-# ==========================================
-# RUN PATH PLANNING
-# ==========================================
-
-def point_signature(point):
-    if point is None:
-        return None
-    return (point["lat"], point["lon"])
-
-
-current_route_signature = (
-    point_signature(st.session_state.start_point),
-    point_signature(st.session_state.destination),
-    algorithm,
-    exploration_mode,
-    max_slope_deg,
-    slope_weight,
-)
-
-# Any changed waypoint or planning parameter invalidates the previous route.
-if st.session_state.route_signature != current_route_signature:
-    st.session_state.planned_route = None
-    st.session_state.route_error = None
-
-if calculate_route_clicked:
-    st.session_state.route_signature = current_route_signature
-    st.session_state.planned_route = None
-    st.session_state.route_error = None
+@st.cache_data(show_spinner=False, ttl=3600)
+def resolve_ctx_tiles(layer_id):
+    """Resolve the actual URL/extension from NASA's WMTS capabilities."""
+    capabilities = f"{NASA_TREK_ROOT}/{layer_id}/1.0.0/WMTSCapabilities.xml"
+    request = Request(capabilities, headers={"User-Agent": "MarsNav/1.0"})
     try:
-        start = st.session_state.start_point
-        destination = st.session_state.destination
-        direct_km = mars_distance(
-            start["lat"], start["lon"],
-            destination["lat"], destination["lon"],
+        with urlopen(request, timeout=8) as response:
+            xml = ET.fromstring(response.read())
+
+        local = lambda tag: tag.rsplit("}", 1)[-1]
+        layer = next(node for node in xml.iter() if local(node.tag) == "Layer")
+        resource = next(
+            node for node in layer.iter()
+            if local(node.tag) == "ResourceURL"
+            and node.get("resourceType") == "tile"
         )
-        # Large regional routes can take longer; the planner itself
-        # validates NoData, coordinates and traversability.
-        with st.spinner("Calculating route on the MOLA terrain grid..."):
-            result = plan_route_from_points(
-                start_point=start,
-                destination_point=destination,
-                algorithm=algorithm,
-                max_slope_deg=max_slope_deg,
-                slope_weight=slope_weight,
-            )
+        template = resource.get("template")
+        if not template:
+            raise ValueError("Missing WMTS ResourceURL template")
 
-        st.session_state.planned_route = {
-            "coordinates": result["coordinates"],
-            "metrics": result["metrics"],
-            "cells": len(result["path"]),
-            "expanded_nodes": result["expanded_nodes"],
-            "algorithm": result["algorithm"],
-            "start_cell": result["start_cell"],
-            "goal_cell": result["goal_cell"],
-        }
-    except (ValueError, RuntimeError, FileNotFoundError) as error:
-        st.session_state.route_error = str(error)
+        style = "default"
+        matrix_set = "default028mm"
+        for node in layer.iter():
+            if local(node.tag) == "Style":
+                ident = next((n.text for n in node.iter() if local(n.tag) == "Identifier"), None)
+                if ident:
+                    style = ident
+                break
+        for node in layer.iter():
+            if local(node.tag) == "TileMatrixSetLink":
+                ident = next((n.text for n in node.iter() if local(n.tag) == "TileMatrixSet"), None)
+                if ident:
+                    matrix_set = ident
+                break
 
-
-# ==========================================
-# MAIN LAYOUT
-# ==========================================
-
-col_map, col_info = st.columns([3, 1])
-
-
-# ==========================================
-# MARTIAN SURFACE MAP
-# ==========================================
-
-with col_map:
-
-    st.header("Martian Surface Map")
-
-    try:
-
-        nasa = get_arcadia_wmts()
-
-        ctx_url = nasa["url"]
-
-        ctx_url = ctx_url.replace(
-            "{Style}", "default"
-        )
-
-        ctx_url = ctx_url.replace(
-            "/1.0.0//", "/1.0.0/"
-        )
-
-        # ==================================
-        # CREATE MAP
-        # ==================================
-
-        mars_map = folium.Map(
-            location=st.session_state.map_center,
-            zoom_start=st.session_state.map_zoom,
-            tiles=None,
-            crs="EPSG4326",
-            control_scale=False,
-            prefer_canvas=True
-        )
-
-        # ==================================
-        # GLOBAL MARS MAP
-        # ==================================
-
-        folium.TileLayer(
-            tiles=MARS_GLOBAL_URL,
-            name="NASA Mars Global Map",
-            attr="NASA Mars Trek / Viking Orbiter",
-            overlay=False,
-            control=True,
-            show=True,
-            min_zoom=0,
-            max_zoom=12,
-            max_native_zoom=7,
-            no_wrap=True
-        ).add_to(mars_map)
-
-        # ==================================
-        # ARCADIA CTX MAP
-        # ==================================
-
-        if optical:
-
-            folium.TileLayer(
-                tiles=ctx_url,
-                name="NASA MRO CTX - Arcadia Planitia",
-                attr="NASA Mars Trek / MRO CTX",
-                min_zoom=nasa["min_zoom"],
-                max_zoom=nasa["max_zoom"],
-                max_native_zoom=nasa["max_zoom"],
-                overlay=True,
-                control=True,
-                opacity=1.0,
-                show=True,
-                no_wrap=True
-            ).add_to(mars_map)
-        # ==================================
-        # NASA MOLA TOPOGRAPHIC RELIEF
-        # ==================================
-
-        if mola:
-
-            folium.TileLayer(
-                tiles=MOLA_URL,
-                name="NASA MOLA Topographic Relief",
-                attr="NASA MGS / MOLA",
-                min_zoom=0,
-                max_zoom=12,
-                max_native_zoom=7,
-                overlay=True,
-                control=True,
-                show=True,
-                opacity=0.65,
-                no_wrap=True
-            ).add_to(mars_map)
-        # ==========================================
-        # TERRAIN SLOPE ANALYSIS
-        # ==========================================
-
-        if show_slope:
-
-            slope_image, slope_bounds, slope_stats = (
-                get_slope_overlay()
-            )
-
-            folium.raster_layers.ImageOverlay(
-                image=slope_image,
-                bounds=slope_bounds,
-                name="Mars_Nav Terrain Slope",
-                opacity=0.75,
-                overlay=True,
-                control=True,
-                show=True,
-                origin="upper",
-                interactive=False,
-                zindex=2
-            ).add_to(mars_map)
-
-        # ==================================
-        # SWIM4MIM ICE CONSISTENCY — REGIONAL RASTER
-        # ==================================
-
-        if show_swim:
-            try:
-                swim_rgba, swim_bounds, swim_stats = get_swim_heatmap()
-            except (FileNotFoundError, ValueError) as error:
-                st.warning(f"SWIM heatmap: {error}")
-            else:
-                folium.raster_layers.ImageOverlay(
-                    image=swim_rgba,
-                    bounds=swim_bounds,
-                    name="SWIM4MIM — Ice Consistency (0–1 m)",
-                    opacity=swim_opacity,
-                    origin="upper",
-                    interactive=False,
-                    control=True,
-                    overlay=True,
-                    show=True,
-                    zindex=3,
-                ).add_to(mars_map)
-                # Visual legend: fixed stretch, not an EVA safety classification.
-                from branca.element import Element
-                legend = """<div style="position:fixed;bottom:35px;left:30px;z-index:9998;
-                    width:220px;background:rgba(255,255,255,0.94);padding:9px 12px;
-                    border:1px solid #777;border-radius:6px;font:12px Arial;">
-                  <b>SWIM Ci · 0–1 m (not temperature)</b><br>
-                  <div style="height:13px;margin:7px 0 4px;
-                  background:linear-gradient(90deg,#ffffd9,#7fcdbb,#41b6c4,#225ea8,#081d58)"></div>
-                  <span style="float:left">0.45</span><span style="float:right">0.80</span>
-                  <div style="clear:both"></div>
-                  <small>Higher Ci = darker blue; regional 0.2° grid.</small>
-                </div>"""
-                mars_map.get_root().html.add_child(Element(legend))
-                st.caption(
-                    "SWIM4MIM ice-consistency raster (0–1 m), "
-                    f"{swim_stats['valid_cells']} valid source cells. "
-                    "Derived from Twin Worlds; not temperature or ice probability."
-                )
-
-        # ==================================
-        # SCIENTIFIC TARGETS — SWIM 0–1 m
-        # ==================================
-
-        if show_ice_pois:
-            try:
-                swim_data = load_swim_pois()
-            except (FileNotFoundError, ValueError) as error:
-                st.warning(f"SWIM POIs: {error}")
-            else:
-                swim_layer = folium.FeatureGroup(
-                    name="SWIM — Candidate Ice Investigation Sites",
-                    overlay=True,
-                    control=True,
-                    show=True,
-                )
-                for poi in swim_data["points"]:
-                    folium.CircleMarker(
-                        location=[poi["lat"], poi["lon"]],
-                        radius=7,
-                        color="#40C9FF",
-                        weight=2,
-                        fill=True,
-                        fill_color="#40C9FF",
-                        fill_opacity=0.85,
-                        tooltip=f"{poi['id']} — SWIM ice research candidate",
-                        popup=folium.Popup(
-                            f"<b>{poi['id']} — SWIM candidate</b><br>"
-                            f"Consistency index: {poi['consistency']:.3f}<br>"
-                            f"Depth range: 0–1 m<br>"
-                            f"Coordinates: {poi['lat']:.5f}° N, "
-                            f"{poi['lon'] % 360:.5f}° E<br>"
-                            "<small>Derived sampling location, not "
-                            "a confirmed ice detection.</small>",
-                            max_width=280,
-                        ),
-                    ).add_to(swim_layer)
-                swim_layer.add_to(mars_map)
-                st.caption(
-                    f"SWIM4MIM (0–1 m): {len(swim_data['points'])} "
-                    "candidate investigation waypoints. "
-                    "Ice consistency is not a probability."
-                )
-
-        # ==================================
-        # CTX COVERAGE
-        # ==================================
-
-        if show_bounds:
-
-            ctx_coverage = folium.Rectangle(
-                bounds=ARCADIA_BOUNDS,
-                color="orange",
-                weight=2,
-                fill=False,
-            )
-            # Folium omits interactive=False in its constructor options;
-            # explicitly serialize the Leaflet option to allow map clicks.
-            ctx_coverage.options["interactive"] = False
-            ctx_coverage.add_to(mars_map)
-
-        # ==================================
-        # DIRECT ROUTE REFERENCE
-        # ==================================
-
-        if (
-            st.session_state.start_point is not None
-            and st.session_state.destination is not None
+        tile_url = template
+        for placeholder, value in {
+            "{Style}": style,
+            "{TileMatrixSet}": matrix_set,
+            "{TileMatrix}": "{z}",
+            "{TileRow}": "{y}",
+            "{TileCol}": "{x}",
+        }.items():
+            tile_url = tile_url.replace(placeholder, value)
+        if not tile_url.startswith("https://") or not all(
+            v in tile_url for v in ("{z}", "{x}", "{y}")
         ):
+            raise ValueError("Unexpected WMTS URL template")
+        return tile_url, None
+    except (OSError, ValueError, ET.ParseError, StopIteration) as exc:
+        # This is only a fallback. The exact format cannot be verified offline.
+        return (
+            f"{NASA_TREK_ROOT}/{layer_id}/"
+            "1.0.0/default/default028mm/{z}/{y}/{x}.png",
+            str(exc),
+        )
 
-            start = st.session_state.start_point
-            destination = st.session_state.destination
 
-            folium.PolyLine(
-                locations=[
-                    [start["lat"], start["lon"]],
-                    [destination["lat"], destination["lon"]]
-                ],
-                color="cyan",
-                weight=4,
-                opacity=0.9,
-                dash_array="8, 8",
-                tooltip="Direct reference - Not a planned route"
-            ).add_to(mars_map)
+SITES = load_sites()
 
-        # ==================================
-        # PLANNED ROUTE (MOLA CELL CENTERS)
-        # ==================================
 
-        if st.session_state.planned_route is not None:
-            planned = st.session_state.planned_route
-            route_coordinates = planned["coordinates"]
-            if len(route_coordinates) > 1:
-                folium.PolyLine(
-                    locations=route_coordinates,
-                    color="#FFDE59",
-                    weight=5,
-                    opacity=1.0,
-                    tooltip=f"{planned['algorithm']} - MOLA planned route",
-                ).add_to(mars_map)
-            elif route_coordinates:
-                # Two selected positions may fall in the same MOLA cell.
-                folium.CircleMarker(
-                    location=route_coordinates[0],
-                    radius=7,
-                    color="#FFDE59",
-                    fill=True,
-                    fill_opacity=1.0,
-                    tooltip="Start and destination share one MOLA cell",
-                ).add_to(mars_map)
+def select_site(site_id):
+    if site_id != GLOBAL_ID and site_id not in SITES:
+        raise ValueError(f"Unknown site: {site_id}")
+    if st.session_state.selected_site != site_id:
+        # Ice controls belong to the selected region, not the planetary view.
+        st.session_state.show_swim_0_1 = False
+        st.session_state.show_swim_1_5 = False
+    st.session_state.selected_site = site_id
+    if site_id == GLOBAL_ID:
+        st.session_state.nav_center = GLOBAL_CENTER
+        st.session_state.nav_zoom = GLOBAL_ZOOM
+    else:
+        site = SITES[site_id]
+        st.session_state.nav_center = (site["lat"], site["lon"])
+        st.session_state.nav_zoom = REGION_ZOOM
+    st.session_state.map_revision += 1
 
-        # ==================================
-        # START POINT MARKER
-        # ==================================
 
-        if st.session_state.start_point is not None:
+def on_region_change():
+    if st.session_state.site_selector is not None:
+        select_site(st.session_state.site_selector)
 
-            start = st.session_state.start_point
 
-            folium.Marker(
-                location=[start["lat"], start["lon"]],
-                popup="Start Point",
-                tooltip="Start Point",
-                icon=folium.Icon(
-                    color="green",
-                    icon="play"
-                )
-            ).add_to(mars_map)
+def on_global_view():
+    st.session_state.site_selector = None
+    select_site(GLOBAL_ID)
 
-        # ==================================
-        # DESTINATION MARKER
-        # ==================================
 
-        if st.session_state.destination is not None:
+def tooltip_for(site):
+    lat, lon = site["lat"], site["lon"]
+    name, category = html.escape(site["name"]), html.escape(site["category"])
+    summary, focus = html.escape(site["summary"]), html.escape(site["focus"])
+    return folium.Tooltip(
+        '<div style="width:300px;white-space:normal;line-height:1.45;'
+        'font-family:Arial,sans-serif;font-size:12px">'
+        f'<b style="font-size:14px">{name}</b><br>'
+        f'<span style="color:#526378">{category} · '
+        f'{abs(lat):.2f}°{"N" if lat >= 0 else "S"}, '
+        f'{abs(lon):.2f}°{"E" if lon >= 0 else "W"}</span><br>'
+        f'{summary}<br><b>Analysis:</b> {focus}</div>',
+        sticky=True,
+    )
 
-            destination = st.session_state.destination
 
-            folium.Marker(
-                location=[
-                    destination["lat"],
-                    destination["lon"]
-                ],
-                popup="Destination",
-                tooltip="Destination",
-                icon=folium.Icon(
-                    color="red",
-                    icon="flag"
-                )
-            ).add_to(mars_map)
+def resolve_clicked_site(map_data):
+    if not map_data:
+        return None
+    point = map_data.get("last_object_clicked")
+    if isinstance(point, dict) and "lat" in point and "lng" in point:
+        try:
+            lat, lon = float(point["lat"]), float(point["lng"])
+            for sid, site in SITES.items():
+                if abs(lat - site["lat"]) < 0.0001 and abs(lon - site["lon"]) < 0.0001:
+                    return sid
+        except (TypeError, ValueError):
+            pass
+    raw = map_data.get("last_object_clicked_tooltip")
+    if isinstance(raw, str):
+        plain = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        for sid, site in SITES.items():
+            if site["name"] in plain:
+                return sid
+    return None
 
-        # ==================================
-        # MAP CONFIGURATION
-        # ==================================
 
-        # Keep the user's current center and zoom; never call fit_bounds() on reruns.
+# Session state
+for key, initial in {
+    "map_revision": 0,
+    "selected_site": GLOBAL_ID,
+    "nav_center": GLOBAL_CENTER,
+    "nav_zoom": GLOBAL_ZOOM,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = initial
 
-        folium.LayerControl(
-            position="topright",
-            collapsed=True
+if st.session_state.get("site_selector") == GLOBAL_ID:
+    st.session_state.site_selector = None
+if "pending_site" in st.session_state:
+    pending = st.session_state.pop("pending_site")
+    if pending in SITES:
+        st.session_state.site_selector = pending
+        select_site(pending)
+
+st.title("ARCADIA ICE EXPLORER")
+
+# Sidebar
+with st.sidebar:
+    st.header("Mission Control")
+    st.subheader("Explore Mars")
+    st.selectbox(
+        "Region", options=list(SITES), index=None,
+        placeholder="Select a region", format_func=lambda sid: SITES[sid]["name"],
+        key="site_selector", on_change=on_region_change,
+    )
+    st.button("🌐 Global Map", use_container_width=True, on_click=on_global_view)
+
+    st.divider()
+    st.subheader("Map Layers")
+    show_ctx = st.checkbox("MRO CTX imagery", value=False, key="show_ctx")
+    show_mola = st.checkbox("MOLA shaded relief", value=False, key="show_mola")
+    show_geology = st.checkbox("USGS SIM 3292 geology", value=False, key="show_geology")
+    geology_opacity = (
+        st.slider("Geology opacity", 0.10, 0.60, 0.25, 0.05, key="geology_opacity")
+        if show_geology else 0.25
+    )
+
+    # Not shown or rendered until a region is selected.
+    region = st.session_state.selected_site
+    show_swim_0_1 = False
+    show_swim_1_5 = False
+    swim_opacity = 0.65
+    if region != GLOBAL_ID:
+        st.divider()
+        st.subheader("Ice Overlays")
+        show_swim_0_1 = st.checkbox(
+            "SWIM ice consistency (0–1 m)", value=False, key="show_swim_0_1"
+        )
+        show_swim_1_5 = st.checkbox(
+            "SWIM ice consistency (1–5 m)", value=False, key="show_swim_1_5"
+        )
+        if show_swim_0_1 or show_swim_1_5:
+            swim_opacity = st.slider(
+                "SWIM opacity", 0.20, 1.00, 0.65, 0.05, key="swim_opacity"
+            )
+            st.markdown("**Ice Target Search**")
+            ice_search_radius = st.slider(
+                "Search radius (km)", 50, 500, 200, 25, key="ice_search_radius"
+            )
+            ice_min_ci = st.slider(
+                "Minimum ice consistency (Ci)", 0.0, 0.85, 0.50, 0.05,
+                key="ice_min_ci",
+            )
+            ice_max_points = st.slider(
+                "Maximum targets", 1, 15, 10, 1, key="ice_max_points"
+            )
+
+map_col, info_col = st.columns([3.6, 1], gap="medium")
+active_swim = []
+poi_stats = []
+render_pois = []
+
+with map_col:
+    st.subheader("Mars Surface Map")
+    mars_map = folium.Map(
+        location=list(st.session_state.nav_center),
+        zoom_start=st.session_state.nav_zoom,
+        tiles=None, crs="EPSG4326", zoom_snap=0.5,
+        min_zoom=0, max_zoom=12, control_scale=False,
+        prefer_canvas=True, zoom_control=True,
+    )
+
+    folium.TileLayer(
+        tiles=VIKING_WMTS, name="NASA Viking | global mosaic",
+        attr="NASA Mars Trek / Viking Orbiter",
+        overlay=False, control=False, show=True,
+        min_zoom=0, max_zoom=12, max_native_zoom=7, no_wrap=True,
+    ).add_to(mars_map)
+
+    if show_mola:
+        folium.TileLayer(
+            tiles=MOLA_WMTS, name="MGS MOLA | shaded relief",
+            attr="NASA Mars Trek / MGS MOLA", opacity=0.72,
+            overlay=True, control=False, show=True,
+            min_zoom=0, max_zoom=12, max_native_zoom=8, no_wrap=True,
         ).add_to(mars_map)
 
-        # ==================================
-        # DISPLAY MAP
-        # ==================================
+    if show_ctx:
+        ctx_id = CTX_REGIONAL_IDS.get(region, CTX_GLOBAL_ID)
+        ctx_tiles, ctx_error = resolve_ctx_tiles(ctx_id)
+        folium.TileLayer(
+            tiles=ctx_tiles, name="MRO CTX | imagery",
+            attr=f"NASA Mars Trek / MRO CTX ({ctx_id})",
+            opacity=0.90, overlay=True, control=False, show=True,
+            min_zoom=0, max_zoom=12, max_native_zoom=12, no_wrap=True,
+        ).add_to(mars_map)
+        if ctx_error:
+            st.sidebar.warning("CTX WMTS metadata unavailable; using a fallback tile URL.")
 
-        map_data = st_folium(
-            mars_map,
-            height=650,
-            use_container_width=True,
-            returned_objects=[
-                "last_clicked", "last_object_clicked_tooltip",
-                "last_object_clicked_count", "center", "zoom"
-            ],
-            center=tuple(st.session_state.map_center),
-            zoom=st.session_state.map_zoom,
-            key="mars_nav_map"
-        )
+    if show_geology:
+        USGSGeologyOverlay(opacity=geology_opacity).add_to(mars_map)
 
-        # ==================================
-        # PRESERVE CURRENT MAP VIEW + MARKER SELECTION
-        # ==================================
+    for enabled, depth, label in (
+        (show_swim_0_1, "Ci_0_1", "0–1 m"),
+        (show_swim_1_5, "Ci_1_5", "1–5 m"),
+    ):
+        if not enabled:
+            continue
+        try:
+            rgba, bounds, info = load_swim_global(depth)
+            folium.raster_layers.ImageOverlay(
+                image=rgba, bounds=bounds,
+                name=f"SWIM4MIM | Ci, {label}",
+                opacity=swim_opacity, interactive=False,
+                pixelated=True, control=False,
+            ).add_to(mars_map)
+            active_swim.append(label)
+        except (FileNotFoundError, ValueError, KeyError, OSError) as exc:
+            st.sidebar.warning(f"SWIM {label} unavailable: {exc}")
 
-        if map_data:
-            center = map_data.get("center")
-            if (isinstance(center, dict) and
-                "lat" in center and "lng" in center):
-                st.session_state.map_center = [float(center["lat"]), float(center["lng"])]
-            zoom = map_data.get("zoom")
-            if zoom is not None:
-                st.session_state.map_zoom = int(zoom)
-
-            # Folium sends the marker tooltip on click. Select the matching
-            # POI on the next rerun, before the sidebar widget is rendered.
-            tooltip = map_data.get("last_object_clicked_tooltip")
-            click_count = map_data.get("last_object_clicked_count")
-            if (show_ice_pois and click_count is not None and
-                click_count != st.session_state.last_swim_marker_click_count):
-                st.session_state.last_swim_marker_click_count = click_count
-                if isinstance(tooltip, str) and tooltip.startswith("SWIM-"):
-                    poi_id = tooltip.split(" — ", 1)[0]
-                    try:
-                        known = {p["id"] for p in load_swim_pois()["points"]}
-                    except (FileNotFoundError, ValueError):
-                        known = set()
-                    if poi_id in known and poi_id != st.session_state.get("swim_target_selector"):
-                        st.session_state.pending_swim_choice = poi_id
-                        st.rerun()
-
-        # ==================================
-        # HANDLE MAP CLICKS
-        # ==================================
-
-        if map_data and map_data.get("last_clicked"):
-
-            clicked = map_data["last_clicked"]
-
-            lat = clicked["lat"]
-            lon = clicked["lng"]
-
-            click_id = (
-                round(lat, 7),
-                round(lon, 7)
+        # Search the selected region, using the GLOBAL SWIM raster.
+        # No Arcadia-specific JSON or precomputed list is required.
+        try:
+            site = SITES[region]
+            search = find_ice_candidates(
+                site["lat"], site["lon"],
+                depth=depth,
+                radius_km=ice_search_radius,
+                min_ci=ice_min_ci,
+                max_points=ice_max_points,
+                min_separation_km=30.0,
             )
+            poi_stats.append((label, search))
+            render_pois.extend(
+                (poi, depth, label) for poi in search["points"]
+            )
+        except (FileNotFoundError, ValueError, KeyError, OSError) as exc:
+            st.sidebar.warning(f"SWIM {label} target search unavailable: {exc}")
 
-            # Process only new clicks.
-            # Prevent old clicks from being
-            # processed again after reruns.
+    # Add scientific markers AFTER all raster overlays, so neither depth hides them.
+    for poi, depth, label in render_pois:
+        folium.CircleMarker(
+            location=[poi["lat"], poi["lon"]],
+            radius=5, color="#111827", weight=1.5,
+            fill=True, fill_color=POI_COLORS[depth], fill_opacity=0.95,
+            tooltip=folium.Tooltip(
+                f'<b>{html.escape(poi["id"])}</b><br>'
+                f'Depth: {label}<br>'
+                f'Ice consistency Ci: {poi["ci"]:.2f}<br>'
+                f'Distance from region center: {poi["distance_km"]:.1f} km<br>'
+                'Coarse SWIM grid cell; research candidate, not confirmed ice.',
+                sticky=True,
+            ),
+        ).add_to(mars_map)
 
-            if click_id != st.session_state.last_processed_click:
+    # Permanent map landmarks remain visible above every scientific overlay.
+    for site in SITES.values():
+        folium.CircleMarker(
+            location=[site["lat"], site["lon"]], radius=7,
+            color="#172033", weight=2, fill=True,
+            fill_color=CATEGORY_COLORS.get(site["category"].strip(), "#94a3b8"),
+            fill_opacity=0.96, tooltip=tooltip_for(site),
+        ).add_to(mars_map)
 
-                st.session_state.last_processed_click = click_id
+    map_data = st_folium(
+        mars_map, key=f"mars_global_v2_{st.session_state.map_revision}",
+        height=610, use_container_width=True,
+        returned_objects=[
+            "last_object_clicked", "last_object_clicked_tooltip", "center", "zoom"
+        ],
+    )
+    if map_data:
+        center = map_data.get("center")
+        zoom = map_data.get("zoom")
+        if isinstance(center, dict) and "lat" in center and "lng" in center:
+            st.session_state.nav_center = (float(center["lat"]), float(center["lng"]))
+        if isinstance(zoom, (int, float)):
+            st.session_state.nav_zoom = zoom
 
-                point = {
-                    "lat": lat,
-                    "lon": lon
-                }
+    clicked_site = resolve_clicked_site(map_data)
+    if clicked_site is not None and clicked_site != st.session_state.selected_site:
+        st.session_state.pending_site = clicked_site
+        st.rerun()
 
-                # Only allow points inside
-                # the selected CTX coverage
+with info_col:
+    st.subheader("Region")
+    selected = st.session_state.selected_site
+    if selected == GLOBAL_ID:
+        st.write("Select a marker or choose a region.")
+    else:
+        site = SITES[selected]
+        st.markdown(f"**{site['name']}**")
+        st.write(site["category"])
+        st.write(f"Lat {site['lat']:.2f}° · Lon {site['lon']:.2f}°")
 
-                inside_arcadia = (
-                    ARCADIA_BOUNDS[0][0] <= lat <= ARCADIA_BOUNDS[1][0]
-                    and
-                    ARCADIA_BOUNDS[0][1] <= lon <= ARCADIA_BOUNDS[1][1]
+    st.divider()
+    st.markdown("**Map key**")
+    for category, color in CATEGORY_COLORS.items():
+        st.markdown(
+            f'<span style="color:{color};font-size:16px">●</span> '
+            f'{html.escape(category)}', unsafe_allow_html=True,
+        )
+    if active_swim:
+        st.divider()
+        st.markdown("**SWIM4MIM · Ice consistency (Ci)**")
+        st.markdown(
+            '<div style="height:10px;border-radius:3px;'
+            'background:linear-gradient(90deg,'
+            '#ffffd9,#c7e9b4,#7fcdbb,#41b6c4,#2c7fb8,#253494)"></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("0 → 0.85 · Higher Ci means stronger ice consistency; not probability.")
+        for depth_label, stats in poi_stats:
+            if stats["valid_cells"] == 0:
+                st.caption(f"{depth_label}: No SWIM data within search radius.")
+            elif stats["eligible_cells"] == 0:
+                peak = stats["max_ci_in_radius"]
+                st.caption(
+                    f"{depth_label}: No cells meet Ci ≥ {stats['min_ci']:.2f} "
+                    f"(regional maximum: {peak:.2f})."
                 )
-
-                if inside_arcadia:
-                    st.session_state.last_map_point = point
-                    if selection_mode == "Start Point":
-                        set_waypoint("start_point", point)
-                    elif selection_mode == "Destination":
-                        set_waypoint("destination", point)
-                    st.rerun()
-
-                else:
-
-                    st.warning(
-                        "Please select a point "
-                        "inside the Arcadia CTX coverage."
-                    )
-
-        st.success("NASA Mars Trek WMTS connected.")
-
-    except Exception as error:
-
-        st.error(
-            f"NASA map error: {error}"
-        )
-
-
-# ==========================================
-# MISSION ANALYSIS
-# ==========================================
-
-with col_info:
-
-    st.header("Mission Analysis")
-
-    st.subheader("Selected Waypoints")
-
-    # ======================================
-    # START POINT
-    # ======================================
-
-    st.markdown("🟢 **Start Point**")
-
-    if st.session_state.start_point:
-
-        start = st.session_state.start_point
-
-        st.write(
-            f"Latitude: {start['lat']:.6f}°"
-        )
-
-        st.write(
-            f"Longitude: {start['lon'] % 360:.6f}° E"
-        )
-
-    else:
-
-        st.info("Start point not selected.")
-
-    st.divider()
-
-    # ======================================
-    # DESTINATION
-    # ======================================
-
-    st.markdown("🔴 **Destination**")
-
-    if st.session_state.destination:
-
-        destination = st.session_state.destination
-
-        st.write(
-            f"Latitude: {destination['lat']:.6f}°"
-        )
-
-        st.write(
-            f"Longitude: {destination['lon'] % 360:.6f}° E"
-        )
-
-    else:
-
-        st.info("Destination not selected.")
-
-    st.divider()
-
-    # ======================================
-    # PLANNING STATUS
-    # ======================================
-
-    st.subheader("Path Planning")
-
-    st.write(
-        "**Algorithm:**",
-        algorithm
-    )
-
-    st.write(
-        "**Exploration Mode:**",
-        exploration_mode
-    )
-
-    if st.session_state.route_error:
-        st.error(st.session_state.route_error)
-
-    if st.session_state.planned_route is not None:
-        if st.session_state.planned_route["cells"] == 1:
-            st.info(
-                "Both waypoints fall inside the same MOLA cell. "
-                "Select points farther apart to display a planned line."
-            )
-        else:
-            st.success("A terrain-aware route has been calculated.")
-    elif (
-        st.session_state.start_point is not None
-        and st.session_state.destination is not None
-    ):
-        st.info("Points selected. Press Calculate Route in the sidebar.")
-
-    else:
-
-        st.warning(
-            "Select both waypoints to continue."
-        )
-
-    st.divider()
-
-    st.subheader("Route Metrics")
-
-    if (
-        st.session_state.start_point is not None
-        and st.session_state.destination is not None
-    ):
-
-        start = st.session_state.start_point
-        destination = st.session_state.destination
-
-        distance = mars_distance(
-            start["lat"],
-            start["lon"],
-            destination["lat"],
-            destination["lon"]
-        )
-
-        st.metric(
-            "Direct Distance",
-            f"{distance:.2f} km"
-        )
-
-        # Advisory for demonstrations, not an EVA operational limit.
-        if distance > 30:
-            st.warning(
-                "Long regional route: planning may be slower. "
-                "For a quick demonstration, choose points within 30 km."
-            )
-
-    else:
-
-        st.metric(
-            "Direct Distance",
-            "N/A"
-        )
-
-    planned = st.session_state.planned_route
-    if planned is not None:
-        metrics = planned["metrics"]
-        st.metric("Planned Distance", f"{metrics['distance_km']:.2f} km")
-        st.metric("Maximum Slope", f"{metrics['max_cell_slope_deg']:.2f}°")
-        st.metric(
-            "Elevation Change",
-            f"{metrics['net_elevation_change_m']:+.1f} m"
-        )
-        st.metric("Cumulative Ascent", f"{metrics['cumulative_ascent_m']:.1f} m")
-        with st.expander("Route calculation details"):
-            st.write(f"Algorithm: {planned['algorithm']}")
-            st.write(f"Traversed MOLA cells: {planned['cells']}")
-            st.write(f"Expanded nodes: {planned['expanded_nodes']}")
-            st.write(f"Cumulative descent: {metrics['cumulative_descent_m']:.1f} m")
-            st.write(f"Cost: {metrics['route_cost_m']:.1f} equivalent meters")
-    else:
-        st.metric("Planned Distance", "N/A")
-        st.metric("Maximum Slope", "N/A")
-        st.metric("Elevation Change", "N/A")
-
-    st.caption(
-        "Direct distance: spherical reference between clicked coordinates. "
-        "Planned distance: MOLA cell centers. Grid spacing is hundreds of "
-        "meters; small obstacles and actual EVA safety are not resolved."
-    )
-
-    # ==========================================
-    # REGIONAL TERRAIN ANALYSIS
-    # ==========================================
-
-    st.divider()
-
-    st.subheader("Regional Terrain Analysis")
-
-    if show_slope:
-
-        _, _, stats = get_slope_overlay()
-
-        st.metric(
-            "Maximum Regional Slope",
-            f"{stats['max_slope']:.2f}°"
-        )
-
-        st.metric(
-            "Average Regional Slope",
-            f"{stats['mean_slope']:.2f}°"
-        )
-
-        st.metric(
-            "Elevation Range",
-            f"{stats['min_elevation']:.0f} "
-            f"to {stats['max_elevation']:.0f} m"
-        )
-
+            else:
+                st.caption(
+                    f"{depth_label}: {len(stats['points'])} research candidates "
+                    f"· {stats['eligible_cells']} eligible cells "
+                    f"· regional max Ci {stats['max_ci_in_radius']:.2f}"
+                )
         st.caption(
-            "Source: NASA MGS MOLA. "
-            "Regional terrain analysis."
+            "Site-centered regional search · coarse 0.2° grid · "
+            "Ci is not a probability or a verified ice detection."
         )
-
-    else:
-
-        st.info(
-            "Enable Terrain Slope Analysis "
-            "to display regional terrain statistics."
-        )
-
-
-# ==========================================
-# FOOTER
-# ==========================================
-
-st.divider()
-
-st.caption(
-    "Mars_Nav | NASA Space Apps Challenge 2026"
-)
