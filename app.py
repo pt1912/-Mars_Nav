@@ -14,6 +14,7 @@ from modules.mars_map import (
     site_from_map_event,
 )
 from modules.mars_theme import apply_theme
+from modules.swim_overlays import create_swim_overlay_group, load_swim_overlay
 from modules.mars_layers import (
     GLOBAL_LAYERS,
     create_regional_ctx_group,
@@ -121,6 +122,24 @@ with st.sidebar:
         show_ctx = st.checkbox("MRO CTX mosaic", key="show_region_ctx")
         st.caption(ctx_info[0] + " · limited local coverage")
 
+    # -------------------------------------------------
+    # ICE OVERLAYS — SWIM4MIM composite Ci
+    # -------------------------------------------------
+    st.divider()
+    st.subheader("Ice Overlays")
+    show_swim_0_1 = st.checkbox(
+        "SWIM ice consistency (0–1 m)", key="show_swim_0_1"
+    )
+    show_swim_1_5 = st.checkbox(
+        "SWIM ice consistency (1–5 m)", key="show_swim_1_5"
+    )
+    swim_opacity = 0.55
+    if show_swim_0_1 or show_swim_1_5:
+        swim_opacity = st.slider(
+            "SWIM opacity", 0.20, 1.00, 0.55, 0.05,
+            key="swim_opacity",
+        )
+
 with st.container(key="mars_intro"):
     st.html('<div class="mars-label">PLANETARY EXPLORATION SYSTEM</div>')
     st.title("MARS ICE EXPLORER")
@@ -146,6 +165,20 @@ with map_col:
             geology_opacity=geology_opacity,
         )
     )
+    # SWIM is kept separate from the static Viking map. PNG encoding is
+    # cached in modules/swim_overlays.py; toggling does not reprocess i8.
+    if show_swim_0_1 or show_swim_1_5:
+        try:
+            groups.append(
+                create_swim_overlay_group(
+                    show_0_1=show_swim_0_1,
+                    show_1_5=show_swim_1_5,
+                    opacity=swim_opacity,
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            st.sidebar.error(f"Unable to load SWIM overlay: {exc}")
+
     groups.append(create_site_markers(SITES, st.session_state.region_selector))
 
     st_folium(
@@ -187,3 +220,25 @@ with info_col:
             f'{html.escape(category)}',
             unsafe_allow_html=True,
         )
+
+
+    # The two SWIM datasets use the SAME color scale: -1 to +1.
+    if show_swim_0_1 or show_swim_1_5:
+        st.divider()
+        st.markdown("**SWIM4MIM · Ice consistency (Ci)**")
+        st.markdown(
+            '<div style="height:12px;border-radius:4px;'
+            'background:linear-gradient(to right,'
+            '#7f1d1d 0%,#cb6a47 30%,#e6e9e9 50%,'
+            '#88d1d0 65%,#2a94be 82.5%,#173b8d 100%);">'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("−1  ·  0  ·  +1")
+        st.caption(
+            "Negative Ci: lower ice consistency. Positive Ci: higher ice "
+            "consistency. Not an ice probability or confirmed deposit."
+        )
+        st.caption("SWIM4MIM derived grid · 0.2° · 60°S–60°N")
+        if show_swim_0_1 and show_swim_1_5:
+            st.caption("Both depths enabled: the 1–5 m layer is drawn above 0–1 m.")
