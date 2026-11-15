@@ -1,10 +1,35 @@
-"""Styling for the Mars-themed Streamlit application."""
-
 from pathlib import Path
+
 import streamlit as st
 
 
+# =====================================================
+# ARCADIA ICE EXPLORER
+# Theme Manager
+# =====================================================
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+CSS_PATH = PROJECT_ROOT / "assets" / "mars_theme.css"
+
+
 def apply_theme():
-    css = Path(__file__).resolve().parents[1] / 'assets' / 'mars_theme.css'
-    st.markdown(f'<style>{css.read_text(encoding="utf-8")}</style>',
-                unsafe_allow_html=True)
+
+    """
+    Load and apply the ARCADIA scientific theme.
+
+    The base theme is configured in:
+        .streamlit/config.toml
+
+    Custom visual styles are loaded from:
+        assets/mars_theme.css
+    """
+
+    if not CSS_PATH.is_file():
+
+        raise FileNotFoundError(
+            f"Theme stylesheet not found: {CSS_PATH}"
+        )
+
+    st.html(CSS_PATH)

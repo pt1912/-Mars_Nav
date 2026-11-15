@@ -1,17 +1,14 @@
-"""Overlay for USGS SIM 3292 geology on Leaflet EPSG:4326.
+"""USGS SIM 3292 ArcGIS tiles controlled by the Streamlit sidebar.
 
-ArcGIS Mars 2000 tiles start at latitude +180°, while Leaflet EPSG:4326
-covers +90°..-90° in the vertical view. The row shift aligns both grids.
-The layer is optional; Viking stays the basemap.
+The ArcGIS Mars tiled service uses a northward row offset relative to
+Leaflet EPSG:4326. This adapter reindexes rows to align them correctly.
 """
 
 from branca.element import MacroElement, Template
 
 
 class USGSGeologyOverlay(MacroElement):
-    """Geologic map tiles on top of Viking with adjustable transparency."""
-
-    def __init__(self, opacity=0.25):
+    def __init__(self, opacity=0.35):
         super().__init__()
         self._name = "USGSGeologyOverlay"
         self.opacity = max(0.0, min(1.0, float(opacity)))
@@ -19,59 +16,68 @@ class USGSGeologyOverlay(MacroElement):
         {% macro script(this, kwargs) %}
         (function() {
             const map = {{ this._parent.get_name() }};
-            const base =
+            const tileRoot =
                 'https://tiles.arcgis.com/tiles/nzS0F0zdNLvs7nc8/' +
                 'arcgis/rest/services/Mars_geology_All_layers_100pct/MapServer/tile/';
-            const layer = L.GridLayer.extend({
+
+            const GeoGrid = L.GridLayer.extend({
+                onAdd: function(map) {
+                    L.GridLayer.prototype.onAdd.call(this, map);
+                    this.setOpacity(this.options.opacity);
+                },
+                setOpacity: function(opacity) {
+                    this.options.opacity = opacity;
+                    const container = this.getContainer();
+                    if (container) container.style.opacity = String(opacity);
+                    return this;
+                },
                 createTile: function(coords, done) {
                     const z = coords.z;
                     if (z === 0) {
                         const canvas = document.createElement('canvas');
                         canvas.width = canvas.height = 256;
-                        canvas.style.pointerEvents = 'none';
                         const ctx = canvas.getContext('2d');
                         let remaining = 2;
-                        let hasError = false;
-                        function half(row, sourceY, targetY) {
-                            const image = new Image();
-                            image.onload = function() {
-                                if (hasError) return;
-                                ctx.drawImage(image, 0, sourceY, 256, 128,
-                                    0, targetY, 256, 128);
+                        let failed = false;
+                        const half = function(row, cropY, drawY) {
+                            const img = new Image();
+                            img.onload = function() {
+                                if (failed) return;
+                                ctx.drawImage(img, 0, cropY, 256, 128, 0, drawY, 256, 128);
                                 if (--remaining === 0) done(null, canvas);
                             };
-                            image.onerror = function(error) {
-                                if (!hasError) {
-                                    hasError = true;
-                                    done(error, canvas);
-                                }
+                            img.onerror = function(e) {
+                                if (!failed) { failed = true; done(e, canvas); }
                             };
-                            image.src = base + '1/' + row + '/' + coords.x;
-                        }
+                            img.src = tileRoot + '1/' + row + '/' + coords.x;
+                        };
                         half(0, 128, 0);
                         half(1, 0, 128);
                         return canvas;
                     }
                     const tile = document.createElement('img');
                     tile.alt = '';
-                    tile.style.pointerEvents = 'none';
-                    tile.onload = () => done(null, tile);
-                    tile.onerror = (error) => done(error, tile);
-                    const level = z + 1;
-                    const row = coords.y + Math.pow(2, z - 1);
-                    tile.src = base + level + '/' + row + '/' + coords.x;
+                    tile.onload = function() { done(null, tile); };
+                    tile.onerror = function(e) { done(e, tile); };
+                    const sourceZoom = z + 1;
+                    const sourceRow = coords.y + Math.pow(2, z - 1);
+                    tile.src = tileRoot + sourceZoom + '/' + sourceRow + '/' + coords.x;
                     return tile;
                 }
             });
-            new layer({
+
+            const geologyLayer = new GeoGrid({
                 tileSize: 256,
+                opacity: {{ this.opacity }},
                 minZoom: 0,
                 maxZoom: 12,
                 maxNativeZoom: 5,
                 noWrap: true,
-                opacity: {{ this.opacity }},
                 attribution: 'USGS SIM 3292 | Tanaka et al. (2014)'
-            }).addTo(map);
+            });
+            // The parent is the dynamic Leaflet FeatureGroup.
+            // This overlay exists only while the USGS checkbox is selected.
+            geologyLayer.addTo(map);
         })();
         {% endmacro %}
         """)
