@@ -5,6 +5,7 @@ from streamlit_folium import st_folium
 from modules.nasa_maps import get_arcadia_wmts
 from modules.mars_geometry import mars_distance
 from modules.slope_overlay import get_slope_overlay
+from modules.path_planning import plan_route_from_points
 
 
 # ==========================================
@@ -59,6 +60,14 @@ if "destination" not in st.session_state:
 
 if "last_processed_click" not in st.session_state:
     st.session_state.last_processed_click = None
+
+# Keep computed routes across Streamlit reruns.
+if "planned_route" not in st.session_state:
+    st.session_state.planned_route = None
+if "route_signature" not in st.session_state:
+    st.session_state.route_signature = None
+if "route_error" not in st.session_state:
+    st.session_state.route_error = None
 
 
 # ==========================================
@@ -140,6 +149,9 @@ with st.sidebar:
     ):
         st.session_state.start_point = None
         st.session_state.destination = None
+        st.session_state.planned_route = None
+        st.session_state.route_signature = None
+        st.session_state.route_error = None
         st.rerun()
 
     st.divider()
@@ -157,10 +169,95 @@ with st.sidebar:
         ["Astronaut", "Rover"]
     )
 
-    st.info(
-        "Path planning will be available "
-        "after terrain data integration."
+    max_slope_deg = st.slider(
+        "Max slope (experimental, degrees)",
+        min_value=0.5,
+        max_value=20.0,
+        value=15.0,
+        step=0.5,
     )
+
+    slope_weight = st.slider(
+        "Slope cost penalty",
+        min_value=0.0,
+        max_value=10.0,
+        value=2.0,
+        step=0.5,
+    )
+
+    st.caption(
+        "Slope thresholds are experimental, not EVA safety limits. "
+        "Astronaut/Rover does not yet change mobility parameters."
+    )
+
+    calculate_route_clicked = st.button(
+        "Calculate Route",
+        disabled=(
+            st.session_state.start_point is None
+            or st.session_state.destination is None
+        ),
+        type="primary",
+        use_container_width=True,
+    )
+
+
+# ==========================================
+# RUN PATH PLANNING
+# ==========================================
+
+def point_signature(point):
+    if point is None:
+        return None
+    return (point["lat"], point["lon"])
+
+
+current_route_signature = (
+    point_signature(st.session_state.start_point),
+    point_signature(st.session_state.destination),
+    algorithm,
+    exploration_mode,
+    max_slope_deg,
+    slope_weight,
+)
+
+# Any changed waypoint or planning parameter invalidates the previous route.
+if st.session_state.route_signature != current_route_signature:
+    st.session_state.planned_route = None
+    st.session_state.route_error = None
+
+if calculate_route_clicked:
+    st.session_state.route_signature = current_route_signature
+    st.session_state.planned_route = None
+    st.session_state.route_error = None
+    try:
+        start = st.session_state.start_point
+        destination = st.session_state.destination
+        direct_km = mars_distance(
+            start["lat"], start["lon"],
+            destination["lat"], destination["lon"],
+        )
+        # Large regional routes can take longer; the planner itself
+        # validates NoData, coordinates and traversability.
+        with st.spinner("Calculating route on the MOLA terrain grid..."):
+            result = plan_route_from_points(
+                start_point=start,
+                destination_point=destination,
+                algorithm=algorithm,
+                max_slope_deg=max_slope_deg,
+                slope_weight=slope_weight,
+            )
+
+        st.session_state.planned_route = {
+            "coordinates": result["coordinates"],
+            "metrics": result["metrics"],
+            "cells": len(result["path"]),
+            "expanded_nodes": result["expanded_nodes"],
+            "algorithm": result["algorithm"],
+            "start_cell": result["start_cell"],
+            "goal_cell": result["goal_cell"],
+        }
+    except (ValueError, RuntimeError, FileNotFoundError) as error:
+        st.session_state.route_error = str(error)
 
 
 # ==========================================
@@ -322,6 +419,32 @@ with col_map:
             ).add_to(mars_map)
 
         # ==================================
+        # PLANNED ROUTE (MOLA CELL CENTERS)
+        # ==================================
+
+        if st.session_state.planned_route is not None:
+            planned = st.session_state.planned_route
+            route_coordinates = planned["coordinates"]
+            if len(route_coordinates) > 1:
+                folium.PolyLine(
+                    locations=route_coordinates,
+                    color="#FFDE59",
+                    weight=5,
+                    opacity=1.0,
+                    tooltip=f"{planned['algorithm']} - MOLA planned route",
+                ).add_to(mars_map)
+            elif route_coordinates:
+                # Two selected positions may fall in the same MOLA cell.
+                folium.CircleMarker(
+                    location=route_coordinates[0],
+                    radius=7,
+                    color="#FFDE59",
+                    fill=True,
+                    fill_opacity=1.0,
+                    tooltip="Start and destination share one MOLA cell",
+                ).add_to(mars_map)
+
+        # ==================================
         # START POINT MARKER
         # ==================================
 
@@ -364,10 +487,20 @@ with col_map:
         # MAP CONFIGURATION
         # ==================================
 
-        mars_map.fit_bounds(
-            ARCADIA_BOUNDS,
-            max_zoom=8
-        )
+        if (
+            st.session_state.planned_route is not None
+            and len(st.session_state.planned_route["coordinates"]) > 1
+        ):
+            mars_map.fit_bounds(
+                st.session_state.planned_route["coordinates"],
+                padding=(50, 50),
+                max_zoom=11,
+            )
+        else:
+            mars_map.fit_bounds(
+                ARCADIA_BOUNDS,
+                max_zoom=8
+            )
 
         folium.LayerControl(
             position="topright",
@@ -434,6 +567,10 @@ with col_map:
 
                         st.session_state.destination = point
 
+                    # A new point invalidates any previously calculated route.
+                    st.session_state.planned_route = None
+                    st.session_state.route_signature = None
+                    st.session_state.route_error = None
                     st.rerun()
 
                 else:
@@ -526,15 +663,22 @@ with col_info:
         exploration_mode
     )
 
-    if (
+    if st.session_state.route_error:
+        st.error(st.session_state.route_error)
+
+    if st.session_state.planned_route is not None:
+        if st.session_state.planned_route["cells"] == 1:
+            st.info(
+                "Both waypoints fall inside the same MOLA cell. "
+                "Select points farther apart to display a planned line."
+            )
+        else:
+            st.success("A terrain-aware route has been calculated.")
+    elif (
         st.session_state.start_point is not None
         and st.session_state.destination is not None
     ):
-
-        st.success(
-            "Start and destination selected. "
-            "Ready for path planning."
-        )
+        st.info("Points selected. Press Calculate Route in the sidebar.")
 
     else:
 
@@ -566,21 +710,11 @@ with col_info:
             f"{distance:.2f} km"
         )
 
-        # Límite orientativo para la demostración
-        if distance > 5:
-
+        # Advisory for demonstrations, not an EVA operational limit.
+        if distance > 30:
             st.warning(
-                "Long-distance mission. "
-                "For the EVA demonstration, "
-                "consider selecting points "
-                "within 5 km."
-            )
-
-        else:
-
-            st.success(
-                "Distance within the demonstration "
-                "EVA planning range."
+                "Long regional route: planning may be slower. "
+                "For a quick demonstration, choose points within 30 km."
             )
 
     else:
@@ -590,19 +724,31 @@ with col_info:
             "N/A"
         )
 
-    st.metric(
-        "Maximum Slope",
-        "N/A"
-    )
-
-    st.metric(
-        "Elevation Change",
-        "N/A"
-    )
+    planned = st.session_state.planned_route
+    if planned is not None:
+        metrics = planned["metrics"]
+        st.metric("Planned Distance", f"{metrics['distance_km']:.2f} km")
+        st.metric("Maximum Slope", f"{metrics['max_cell_slope_deg']:.2f}°")
+        st.metric(
+            "Elevation Change",
+            f"{metrics['net_elevation_change_m']:+.1f} m"
+        )
+        st.metric("Cumulative Ascent", f"{metrics['cumulative_ascent_m']:.1f} m")
+        with st.expander("Route calculation details"):
+            st.write(f"Algorithm: {planned['algorithm']}")
+            st.write(f"Traversed MOLA cells: {planned['cells']}")
+            st.write(f"Expanded nodes: {planned['expanded_nodes']}")
+            st.write(f"Cumulative descent: {metrics['cumulative_descent_m']:.1f} m")
+            st.write(f"Cost: {metrics['route_cost_m']:.1f} equivalent meters")
+    else:
+        st.metric("Planned Distance", "N/A")
+        st.metric("Maximum Slope", "N/A")
+        st.metric("Elevation Change", "N/A")
 
     st.caption(
-        "Direct distance assumes a spherical Mars. "
-        "Terrain elevation and obstacles are not included."
+        "Direct distance: spherical reference between clicked coordinates. "
+        "Planned distance: MOLA cell centers. Grid spacing is hundreds of "
+        "meters; small obstacles and actual EVA safety are not resolved."
     )
 
     # ==========================================
