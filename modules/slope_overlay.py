@@ -1,99 +1,87 @@
-import numpy as np
+"""Capa georreferenciada RGBA de pendientes Horn para Mars_Nav.
+
+Módulo de visualización: no determina seguridad EVA ni recalcula pendientes.
+`get_slope_overlay()` conserva la interfaz (imagen, límites, estadísticas)
+esperada por app.py.
+"""
 
 from functools import lru_cache
+
+import numpy as np
 from matplotlib import colormaps
 
-from modules.terrain_analysis import (
-    load_terrain,
-    calculate_slope
-)
+from modules.terrain_analysis import analyze_terrain
+
+# Estos umbrales son exclusivamente VISUALES, no límites de seguridad EVA.
+SLOPE_MIN_DISPLAY_DEG = 0.3
+SLOPE_MAX_DISPLAY_DEG = 5.0
 
 
-# ==========================================
-# SLOPE OVERLAY CONFIGURATION
-# ==========================================
+def _to_leaflet_longitudes(longitudes):
+    """Convierte 0-360 E a [-180, 180) y rechaza una discontinuidad.
 
-SLOPE_MAX_DISPLAY = 5.0
-SLOPE_MIN_DISPLAY = 0.3
+    Arcadia Planitia (186-191° E) corresponde a ~-174 a -169°.
+    Para una futura región que cruce el meridiano 180° se necesitará
+    un tratamiento especial (dividir capa o cambiar origen del mapa).
+    """
+    longitude = np.asarray(longitudes, dtype=np.float64)
+    converted = ((longitude + 180.0) % 360.0) - 180.0
+    if converted.size < 2 or not np.all(np.diff(converted) > 0):
+        raise ValueError(
+            "Las longitudes cruzan una discontinuidad o no están ordenadas; "
+            "el overlay debe prepararse por sectores."
+        )
+    return converted
 
-
-# ==========================================
-# GENERATE SLOPE OVERLAY
-# ==========================================
 
 @lru_cache(maxsize=1)
 def get_slope_overlay():
+    """Devuelve (rgba_uint8, leaflet_bounds, stats) para Folium ImageOverlay.
 
-    # Load MOLA elevation data
-    elevation, latitudes, longitudes = load_terrain()
+    Las celdas sin pendiente evaluable (incluidos los bordes Horn)
+    tienen transparencia 0. No convierte los NaN en datos científicos.
+    """
+    result = analyze_terrain()
+    slope = result["slope"]
+    valid = result["valid"]
+    lat = result["latitudes"]
+    lon = _to_leaflet_longitudes(result["longitudes"])
 
-    # Calculate terrain slope
-    slope = calculate_slope(
-        elevation,
-        latitudes,
-        longitudes
-    )
+    if not np.any(valid):
+        raise ValueError("No existen pendientes válidas para representar.")
 
-    # Normalize slope for visualization
-    normalized = np.clip(
-        slope / SLOPE_MAX_DISPLAY,
-        0,
-        1
-    )
+    # Convertir NaN solo para aplicar colores, sin modificar la matriz original.
+    display_slope = np.nan_to_num(slope, nan=0.0, posinf=0.0, neginf=0.0)
+    normalized = np.clip(display_slope / SLOPE_MAX_DISPLAY_DEG, 0.0, 1.0)
+    rgba = np.rint(colormaps["magma"](normalized) * 255).astype(np.uint8)
 
-    # Apply color map
-    cmap = colormaps["magma"]
+    # Los umbrales cromáticos son para visibilidad, NO transitabilidad.
+    shown = valid & (slope >= SLOPE_MIN_DISPLAY_DEG)
+    rgba[..., 3] = np.where(shown, 220, 0).astype(np.uint8)
 
-    rgba = (
-        cmap(normalized) * 255
-    ).astype(np.uint8)
-
-    # Make low slopes transparent
-    valid = (
-        np.isfinite(slope)
-        & (elevation > -32000)
-    )
-
-    rgba[:, :, 3] = np.where(
-        valid & (slope >= SLOPE_MIN_DISPLAY),
-        220,
-        0
-    ).astype(np.uint8)
-
-    # ======================================
-    # GEOGRAPHIC BOUNDS
-    # ======================================
-
-    lat_step = abs(
-        latitudes[1] - latitudes[0]
-    )
-
-    lon_step = abs(
-        longitudes[1] - longitudes[0]
-    )
-
-    lat_min = latitudes[-1] - lat_step / 2
-    lat_max = latitudes[0] + lat_step / 2
-
-    lon_min = longitudes[0] - lon_step / 2
-    lon_max = longitudes[-1] + lon_step / 2
-
-    # Convert longitude from 0-360 to -180/180
+    # npz guarda coordenadas en los centros de píxeles.
+    dlat = abs(lat[1] - lat[0])
+    dlon = abs(lon[1] - lon[0])
     bounds = [
-        [lat_min, lon_min - 360],
-        [lat_max, lon_max - 360]
+        [float(lat[-1] - dlat / 2), float(lon[0] - dlon / 2)],
+        [float(lat[0] + dlat / 2), float(lon[-1] + dlon / 2)],
     ]
 
-    # ======================================
-    # TERRAIN STATISTICS
-    # ======================================
-
-    statistics = {
-        "min_slope": float(np.min(slope[valid])),
-        "max_slope": float(np.max(slope[valid])),
-        "mean_slope": float(np.mean(slope[valid])),
-        "min_elevation": float(np.min(elevation[valid])),
-        "max_elevation": float(np.max(elevation[valid]))
+    metrics = result["stats"]
+    stats = {
+        "min_slope": metrics["slope_min_deg"],
+        "max_slope": metrics["slope_max_deg"],
+        "mean_slope": metrics["slope_mean_deg"],
+        "min_elevation": metrics["elevation_min_m"],
+        "max_elevation": metrics["elevation_max_m"],
     }
+    return rgba, bounds, stats
 
-    return rgba, bounds, statistics
+
+if __name__ == "__main__":
+    overlay, limits, stats = get_slope_overlay()
+    print("MARS_NAV — SLOPE OVERLAY")
+    print("RGBA:", overlay.shape, overlay.dtype)
+    print("Límites Leaflet:", limits)
+    print("Píxeles visibles:", int(np.count_nonzero(overlay[..., 3])))
+    print("Pendiente máxima Horn:", f"{stats['max_slope']:.4f}°")
