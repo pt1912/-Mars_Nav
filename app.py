@@ -6,6 +6,8 @@ from modules.nasa_maps import get_arcadia_wmts
 from modules.mars_geometry import mars_distance
 from modules.slope_overlay import get_slope_overlay
 from modules.path_planning import plan_route_from_points
+from modules.scientific_targets import load_swim_pois
+from modules.swim_heatmap import get_swim_heatmap
 
 
 # ==========================================
@@ -69,6 +71,35 @@ if "route_signature" not in st.session_state:
 if "route_error" not in st.session_state:
     st.session_state.route_error = None
 
+# Persist the Leaflet viewport and allow reusing a clicked location.
+if "map_center" not in st.session_state:
+    st.session_state.map_center = list(ARCADIA_CENTER)
+if "map_zoom" not in st.session_state:
+    st.session_state.map_zoom = 8
+if "last_map_point" not in st.session_state:
+    st.session_state.last_map_point = None
+if "last_swim_marker_click_count" not in st.session_state:
+    st.session_state.last_swim_marker_click_count = 0
+
+# A clicked SWIM marker becomes the selected sidebar target on the NEXT rerun.
+# This avoids modifying an existing Streamlit widget after it was instantiated.
+pending_swim = st.session_state.pop("pending_swim_choice", None)
+if pending_swim:
+    st.session_state["swim_target_selector"] = pending_swim
+
+
+def set_waypoint(which, point):
+    lat, lon = float(point["lat"]), float(point["lon"])
+    if not (ARCADIA_BOUNDS[0][0] <= lat <= ARCADIA_BOUNDS[1][0]
+            and ARCADIA_BOUNDS[0][1] <= lon <= ARCADIA_BOUNDS[1][1]):
+        raise ValueError("El punto está fuera de Arcadia CTX.")
+    if which not in ("start_point", "destination"):
+        raise ValueError("Tipo de marcador no reconocido.")
+    st.session_state[which] = {"lat": lat, "lon": lon}
+    st.session_state.planned_route = None
+    st.session_state.route_signature = None
+    st.session_state.route_error = None
+
 
 # ==========================================
 # HEADER
@@ -127,6 +158,21 @@ with st.sidebar:
     value=False
     )
 
+    show_swim = st.checkbox(
+        "SWIM — Ice Consistency Heatmap (0–1 m)",
+        value=False
+    )
+    swim_opacity = 0.70
+    if show_swim:
+        swim_opacity = st.slider(
+            "SWIM layer opacity", min_value=0.20, max_value=1.00,
+            value=0.70, step=0.05
+        )
+    show_ice_pois = st.checkbox(
+        "Show SWIM research points", value=True,
+        disabled=not show_swim
+    ) and show_swim
+
     st.divider()
 
     # Waypoint selection
@@ -139,9 +185,52 @@ with st.sidebar:
     )
 
     st.caption(
-        "Select a point type and click "
-        "on the Martian surface."
+        "Click the map to set the selected waypoint. "
+        "You can also reassign the most recently clicked location:"
     )
+    if st.session_state.last_map_point is not None:
+        p = st.session_state.last_map_point
+        st.caption(f"Selected: {p['lat']:.5f}°, {p['lon']:.5f}°")
+        last_col_start, last_col_end = st.columns(2)
+        with last_col_start:
+            if st.button("Use as Start", key="clicked_as_start", use_container_width=True):
+                set_waypoint("start_point", p)
+                st.rerun()
+        with last_col_end:
+            if st.button("Use as Destination", key="clicked_as_dest", use_container_width=True):
+                set_waypoint("destination", p)
+                st.rerun()
+
+    if show_swim:
+        st.markdown("**Scientific target selection**")
+        try:
+            swim_poi_catalog = load_swim_pois()
+        except (FileNotFoundError, ValueError) as error:
+            st.warning(f"SWIM POIs: {error}")
+            swim_poi_catalog = None
+        if swim_poi_catalog and swim_poi_catalog["points"]:
+            poi_lookup = {p["id"]: p for p in swim_poi_catalog["points"]}
+            existing = st.session_state.get("swim_target_selector")
+            if existing not in poi_lookup:
+                st.session_state["swim_target_selector"] = next(iter(poi_lookup))
+            target_id = st.selectbox(
+                "Choose a SWIM point or click its marker on the map",
+                options=list(poi_lookup),
+                format_func=lambda v: f"{v} · Ci={poi_lookup[v]['consistency']:.2f}",
+                key="swim_target_selector",
+            )
+            target = poi_lookup[target_id]
+            st.caption(f"{target['lat']:.4f}° N, {target['lon']:.4f}° · Ci={target['consistency']:.2f}")
+            poi_col_start, poi_col_end = st.columns(2)
+            with poi_col_start:
+                if st.button("POI → Start", key="poi_to_start", use_container_width=True):
+                    set_waypoint("start_point", target)
+                    st.rerun()
+            with poi_col_end:
+                if st.button("POI → Destination", key="poi_to_dest", use_container_width=True):
+                    set_waypoint("destination", target)
+                    st.rerun()
+            st.caption("Ci es consistencia de hielo, no una probabilidad.")
 
     if st.button(
         "Clear Points",
@@ -152,6 +241,13 @@ with st.sidebar:
         st.session_state.planned_route = None
         st.session_state.route_signature = None
         st.session_state.route_error = None
+        st.session_state.last_map_point = None
+        st.session_state.last_processed_click = None
+        st.rerun()
+
+    if st.button("Reset Map View", use_container_width=True):
+        st.session_state.map_center = list(ARCADIA_CENTER)
+        st.session_state.map_zoom = 8
         st.rerun()
 
     st.divider()
@@ -294,8 +390,8 @@ with col_map:
         # ==================================
 
         mars_map = folium.Map(
-            location=ARCADIA_CENTER,
-            zoom_start=8,
+            location=st.session_state.map_center,
+            zoom_start=st.session_state.map_zoom,
             tiles=None,
             crs="EPSG4326",
             control_scale=False,
@@ -381,18 +477,106 @@ with col_map:
             ).add_to(mars_map)
 
         # ==================================
+        # SWIM4MIM ICE CONSISTENCY — REGIONAL RASTER
+        # ==================================
+
+        if show_swim:
+            try:
+                swim_rgba, swim_bounds, swim_stats = get_swim_heatmap()
+            except (FileNotFoundError, ValueError) as error:
+                st.warning(f"SWIM heatmap: {error}")
+            else:
+                folium.raster_layers.ImageOverlay(
+                    image=swim_rgba,
+                    bounds=swim_bounds,
+                    name="SWIM4MIM — Ice Consistency (0–1 m)",
+                    opacity=swim_opacity,
+                    origin="upper",
+                    interactive=False,
+                    control=True,
+                    overlay=True,
+                    show=True,
+                    zindex=3,
+                ).add_to(mars_map)
+                # Visual legend: fixed stretch, not an EVA safety classification.
+                from branca.element import Element
+                legend = """<div style="position:fixed;bottom:35px;left:30px;z-index:9998;
+                    width:220px;background:rgba(255,255,255,0.94);padding:9px 12px;
+                    border:1px solid #777;border-radius:6px;font:12px Arial;">
+                  <b>SWIM Ci · 0–1 m (not temperature)</b><br>
+                  <div style="height:13px;margin:7px 0 4px;
+                  background:linear-gradient(90deg,#ffffd9,#7fcdbb,#41b6c4,#225ea8,#081d58)"></div>
+                  <span style="float:left">0.45</span><span style="float:right">0.80</span>
+                  <div style="clear:both"></div>
+                  <small>Higher Ci = darker blue; regional 0.2° grid.</small>
+                </div>"""
+                mars_map.get_root().html.add_child(Element(legend))
+                st.caption(
+                    "SWIM4MIM ice-consistency raster (0–1 m), "
+                    f"{swim_stats['valid_cells']} valid source cells. "
+                    "Derived from Twin Worlds; not temperature or ice probability."
+                )
+
+        # ==================================
+        # SCIENTIFIC TARGETS — SWIM 0–1 m
+        # ==================================
+
+        if show_ice_pois:
+            try:
+                swim_data = load_swim_pois()
+            except (FileNotFoundError, ValueError) as error:
+                st.warning(f"SWIM POIs: {error}")
+            else:
+                swim_layer = folium.FeatureGroup(
+                    name="SWIM — Candidate Ice Investigation Sites",
+                    overlay=True,
+                    control=True,
+                    show=True,
+                )
+                for poi in swim_data["points"]:
+                    folium.CircleMarker(
+                        location=[poi["lat"], poi["lon"]],
+                        radius=7,
+                        color="#40C9FF",
+                        weight=2,
+                        fill=True,
+                        fill_color="#40C9FF",
+                        fill_opacity=0.85,
+                        tooltip=f"{poi['id']} — SWIM ice research candidate",
+                        popup=folium.Popup(
+                            f"<b>{poi['id']} — SWIM candidate</b><br>"
+                            f"Consistency index: {poi['consistency']:.3f}<br>"
+                            f"Depth range: 0–1 m<br>"
+                            f"Coordinates: {poi['lat']:.5f}° N, "
+                            f"{poi['lon'] % 360:.5f}° E<br>"
+                            "<small>Derived sampling location, not "
+                            "a confirmed ice detection.</small>",
+                            max_width=280,
+                        ),
+                    ).add_to(swim_layer)
+                swim_layer.add_to(mars_map)
+                st.caption(
+                    f"SWIM4MIM (0–1 m): {len(swim_data['points'])} "
+                    "candidate investigation waypoints. "
+                    "Ice consistency is not a probability."
+                )
+
+        # ==================================
         # CTX COVERAGE
         # ==================================
 
         if show_bounds:
 
-            folium.Rectangle(
+            ctx_coverage = folium.Rectangle(
                 bounds=ARCADIA_BOUNDS,
                 color="orange",
                 weight=2,
                 fill=False,
-                tooltip="Arcadia Planitia CTX Coverage"
-            ).add_to(mars_map)
+            )
+            # Folium omits interactive=False in its constructor options;
+            # explicitly serialize the Leaflet option to allow map clicks.
+            ctx_coverage.options["interactive"] = False
+            ctx_coverage.add_to(mars_map)
 
         # ==================================
         # DIRECT ROUTE REFERENCE
@@ -487,20 +671,7 @@ with col_map:
         # MAP CONFIGURATION
         # ==================================
 
-        if (
-            st.session_state.planned_route is not None
-            and len(st.session_state.planned_route["coordinates"]) > 1
-        ):
-            mars_map.fit_bounds(
-                st.session_state.planned_route["coordinates"],
-                padding=(50, 50),
-                max_zoom=11,
-            )
-        else:
-            mars_map.fit_bounds(
-                ARCADIA_BOUNDS,
-                max_zoom=8
-            )
+        # Keep the user's current center and zoom; never call fit_bounds() on reruns.
 
         folium.LayerControl(
             position="topright",
@@ -515,9 +686,44 @@ with col_map:
             mars_map,
             height=650,
             use_container_width=True,
-            returned_objects=["last_clicked"],
+            returned_objects=[
+                "last_clicked", "last_object_clicked_tooltip",
+                "last_object_clicked_count", "center", "zoom"
+            ],
+            center=tuple(st.session_state.map_center),
+            zoom=st.session_state.map_zoom,
             key="mars_nav_map"
         )
+
+        # ==================================
+        # PRESERVE CURRENT MAP VIEW + MARKER SELECTION
+        # ==================================
+
+        if map_data:
+            center = map_data.get("center")
+            if (isinstance(center, dict) and
+                "lat" in center and "lng" in center):
+                st.session_state.map_center = [float(center["lat"]), float(center["lng"])]
+            zoom = map_data.get("zoom")
+            if zoom is not None:
+                st.session_state.map_zoom = int(zoom)
+
+            # Folium sends the marker tooltip on click. Select the matching
+            # POI on the next rerun, before the sidebar widget is rendered.
+            tooltip = map_data.get("last_object_clicked_tooltip")
+            click_count = map_data.get("last_object_clicked_count")
+            if (show_ice_pois and click_count is not None and
+                click_count != st.session_state.last_swim_marker_click_count):
+                st.session_state.last_swim_marker_click_count = click_count
+                if isinstance(tooltip, str) and tooltip.startswith("SWIM-"):
+                    poi_id = tooltip.split(" — ", 1)[0]
+                    try:
+                        known = {p["id"] for p in load_swim_pois()["points"]}
+                    except (FileNotFoundError, ValueError):
+                        known = set()
+                    if poi_id in known and poi_id != st.session_state.get("swim_target_selector"):
+                        st.session_state.pending_swim_choice = poi_id
+                        st.rerun()
 
         # ==================================
         # HANDLE MAP CLICKS
@@ -558,19 +764,11 @@ with col_map:
                 )
 
                 if inside_arcadia:
-
+                    st.session_state.last_map_point = point
                     if selection_mode == "Start Point":
-
-                        st.session_state.start_point = point
-
+                        set_waypoint("start_point", point)
                     elif selection_mode == "Destination":
-
-                        st.session_state.destination = point
-
-                    # A new point invalidates any previously calculated route.
-                    st.session_state.planned_route = None
-                    st.session_state.route_signature = None
-                    st.session_state.route_error = None
+                        set_waypoint("destination", point)
                     st.rerun()
 
                 else:
