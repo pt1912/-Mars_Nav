@@ -136,3 +136,50 @@ def site_from_map_event(event, sites):
             if abs(lat - site["lat"]) < 0.0001 and abs(lon - site["lon"]) < 0.0001:
                 return site_id
     return None
+
+
+# =====================================================
+# SWIM RESEARCH CANDIDATES
+# =====================================================
+
+ICE_TARGET_COLORS = {
+    "Ci_0_1": "#E879F9",  # Violet: 0–1 m
+    "Ci_1_5": "#FDE047",  # Yellow: 1–5 m
+}
+
+
+def create_ice_target_markers(search_results):
+    """Draw only candidates returned by the regional numeric SWIM search.
+
+    Different marker sizes preserve visibility when depths overlap.
+    These are coarse research candidates, NOT confirmed deposits.
+    """
+    group = folium.FeatureGroup(name="SWIM Research Candidates", control=False)
+    for result in search_results:
+        depth = result["depth"]
+        label = result["depth_label"]
+        color = ICE_TARGET_COLORS[depth]
+        for candidate in result["points"]:
+            marker_text = (
+                '<div style="font-family:Arial,sans-serif;font-size:12px;'
+                'line-height:1.5;white-space:normal;width:255px;color:#1B2633">'
+                f'<b>{html.escape(candidate["id"])} · SWIM {html.escape(label)}</b><br>'
+                f'Ice consistency (Ci): <b>{candidate["ci"]:.2f}</b><br>'
+                f'Latitude: {candidate["lat"]:.3f}°<br>'
+                f'Longitude: {candidate["lon"]:.3f}°<br>'
+                f'Distance to region center: {candidate["distance_km"]:.1f} km<br>'
+                '<i>Candidate raster cell — ice not confirmed.</i>'
+                '</div>'
+            )
+            folium.CircleMarker(
+                location=[candidate["lat"], candidate["lon"]],
+                radius=7 if depth == "Ci_0_1" else 4,
+                weight=1.5,
+                color="#121826",
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.97,
+                bubbling_mouse_events=False,
+                tooltip=folium.Tooltip(marker_text, sticky=True),
+            ).add_to(group)
+    return group

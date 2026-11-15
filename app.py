@@ -5,15 +5,18 @@ from streamlit_folium import st_folium
 
 from modules.mars_map import (
     CATEGORY_COLORS,
+    ICE_TARGET_COLORS,
     GLOBAL_CENTER,
     GLOBAL_ZOOM,
     REGION_ZOOM,
     create_mars_map,
+    create_ice_target_markers,
     create_site_markers,
     load_sites,
     site_from_map_event,
 )
 from modules.mars_theme import apply_theme
+from modules.ice_targets import find_ice_candidates
 from modules.swim_overlays import create_swim_overlay_group, load_swim_overlay
 from modules.mars_layers import (
     GLOBAL_LAYERS,
@@ -134,11 +137,32 @@ with st.sidebar:
         "SWIM ice consistency (1–5 m)", key="show_swim_1_5"
     )
     swim_opacity = 0.55
-    if show_swim_0_1 or show_swim_1_5:
+    swim_enabled = show_swim_0_1 or show_swim_1_5
+    if swim_enabled:
         swim_opacity = st.slider(
             "SWIM opacity", 0.20, 1.00, 0.55, 0.05,
             key="swim_opacity",
         )
+
+    # Search controls are conditional on BOTH a region and a SWIM layer.
+    search_enabled = swim_enabled and st.session_state.region_selector is not None
+    if search_enabled:
+        st.markdown("**Ice Target Search**")
+        ice_search_radius = st.slider(
+            "Search radius (km)", 50, 500, 200, 25,
+            key="ice_search_radius",
+        )
+        ice_min_ci = st.slider(
+            "Minimum ice consistency (Ci)", 0.0, 1.0, 0.50, 0.05,
+            key="ice_min_ci",
+        )
+        ice_max_points = st.slider(
+            "Maximum targets per depth", 1, 20, 10, 1,
+            key="ice_max_points",
+        )
+        st.caption("Target spacing: 30 km · Grid: 0.2°")
+    elif swim_enabled:
+        st.caption("Select a region to search for scientific targets.")
 
 with st.container(key="mars_intro"):
     st.html('<div class="mars-label">PLANETARY EXPLORATION SYSTEM</div>')
@@ -148,6 +172,32 @@ with st.container(key="mars_intro"):
         "scientific data integration for Mars Ice exploration."
     )
     st.html('<div class="mars-separator"></div>')
+
+# Perform numeric SWIM searches only when their controls are visible.
+# The search module caches both raster grids and query results.
+search_results = []
+if search_enabled:
+    selected_site = SITES[st.session_state.region_selector]
+    for active, depth in (
+        (show_swim_0_1, "Ci_0_1"),
+        (show_swim_1_5, "Ci_1_5"),
+    ):
+        if not active:
+            continue
+        try:
+            search_results.append(
+                find_ice_candidates(
+                    selected_site["lat"],
+                    selected_site["lon"],
+                    depth=depth,
+                    radius_km=ice_search_radius,
+                    min_ci=ice_min_ci,
+                    max_points=ice_max_points,
+                    min_separation_km=30.0,
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            st.sidebar.warning(f"SWIM {depth} target search unavailable: {exc}")
 
 map_col, info_col = st.columns([3.6, 1], gap="medium")
 
@@ -179,6 +229,9 @@ with map_col:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             st.sidebar.error(f"Unable to load SWIM overlay: {exc}")
 
+    if search_results:
+        groups.append(create_ice_target_markers(search_results))
+    # Keep region markers above SWIM candidates in the drawing order.
     groups.append(create_site_markers(SITES, st.session_state.region_selector))
 
     st_folium(
@@ -242,3 +295,42 @@ with info_col:
         st.caption("SWIM4MIM derived grid · 0.2° · 60°S–60°N")
         if show_swim_0_1 and show_swim_1_5:
             st.caption("Both depths enabled: the 1–5 m layer is drawn above 0–1 m.")
+
+
+    # Candidate statistics are shown only when a region and SWIM depth are active.
+    if search_enabled:
+        st.divider()
+        st.markdown("**Ice Target Analysis**")
+        for result in search_results:
+            label = result["depth_label"]
+            points = result["points"]
+            peak = result["max_ci_in_radius"]
+            marker_color = ICE_TARGET_COLORS[result["depth"]]
+            st.markdown(
+                f'<span style="color:{marker_color};font-size:16px;">●</span> '
+                f'<b>SWIM {html.escape(label)}</b>',
+                unsafe_allow_html=True,
+            )
+            if result["valid_cells"] == 0:
+                st.caption("No valid SWIM grid cells in the search area.")
+            elif not points:
+                st.caption(
+                    f"No candidates reach Ci ≥ {result['min_ci']:.2f}. "
+                    f"Maximum regional Ci: {peak:.2f}."
+                )
+            else:
+                st.caption(
+                    f"{len(points)} candidates · "
+                    f"{result['eligible_cells']} eligible cells · "
+                    f"Peak Ci {peak:.2f}"
+                )
+                with st.expander(f"SWIM {label} targets ({len(points)})"):
+                    for point in points:
+                        st.markdown(
+                            f"`{point['id']}` · **Ci {point['ci']:.2f}** "
+                            f"· {point['distance_km']:.0f} km"
+                        )
+        st.caption(
+            "Targets are ranked by SWIM consistency, not EVA safety or "
+            "verified ice. Values describe coarse 0.2° raster cells."
+        )
