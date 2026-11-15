@@ -17,6 +17,13 @@ from modules.mars_map import (
 )
 from modules.mars_theme import apply_theme
 from modules.ice_targets import find_ice_candidates
+from modules.eva_waypoints import (
+    build_waypoint_catalog,
+    create_waypoint_markers,
+    decode_map_click,
+    straight_line_distance_km,
+    waypoint_from_click,
+)
 from modules.swim_overlays import create_swim_overlay_group, load_swim_overlay
 from modules.mars_layers import (
     GLOBAL_LAYERS,
@@ -43,6 +50,31 @@ if "map_center" not in st.session_state:
 if "map_zoom" not in st.session_state:
     st.session_state.map_zoom = GLOBAL_ZOOM
 
+# EVA waypoint state: kept separate from the regional research candidates.
+for key, default in (
+    ("eva_start", None),
+    ("eva_destination", None),
+    ("eva_start_option", None),
+    ("eva_destination_option", None),
+    ("eva_click_mode", "Browse"),
+    ("eva_catalog", {}),
+    ("eva_last_marker_count", None),
+    ("eva_last_map_click", None),
+):
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+def reset_eva_waypoints():
+    """Do not carry start/end coordinates into another study region."""
+    st.session_state.eva_start = None
+    st.session_state.eva_destination = None
+    st.session_state.eva_start_option = None
+    st.session_state.eva_destination_option = None
+    st.session_state.eva_click_mode = "Browse"
+    st.session_state.eva_catalog = {}
+
+
 
 def navigate_to(site_id):
     if site_id is None:
@@ -55,21 +87,62 @@ def navigate_to(site_id):
 
 
 def on_region_change():
+    reset_eva_waypoints()
     navigate_to(st.session_state.region_selector)
 
 
 def on_global_map():
+    reset_eva_waypoints()
     st.session_state.region_selector = None
     navigate_to(None)
 
 
+def on_eva_point_change(role):
+    """Assign a waypoint selected in the two dropdowns below the map."""
+    selected = st.session_state.get(f"eva_{role}_option")
+    entry = st.session_state.eva_catalog.get(selected)
+    st.session_state[f"eva_{role}"] = dict(entry) if entry else None
+
+
+def clear_eva_point(role):
+    st.session_state[f"eva_{role}"] = None
+    st.session_state[f"eva_{role}_option"] = None
+
+
 def on_marker_click():
+    """Handle map clicks without listening to zoom or map movement."""
     event = st.session_state.get("mars_surface_map")
-    site_id = site_from_map_event(event, SITES)
-    if site_id is not None and site_id != st.session_state.region_selector:
-        # Callback executes before widgets are created in the new run.
-        st.session_state.region_selector = site_id
-        navigate_to(site_id)
+    position, is_marker, counter, last_map_click = decode_map_click(
+        event,
+        st.session_state.eva_last_marker_count,
+        st.session_state.eva_last_map_click,
+    )
+    st.session_state.eva_last_marker_count = counter
+    st.session_state.eva_last_map_click = last_map_click
+    if position is None:
+        return
+
+    selected_region = st.session_state.region_selector
+    mode = st.session_state.eva_click_mode
+    if selected_region is not None and mode in ("Set start", "Set destination"):
+        role = "start" if mode == "Set start" else "destination"
+        waypoint = waypoint_from_click(
+            position[0], position[1], is_marker,
+            st.session_state.eva_catalog, event, SITES,
+        )
+        st.session_state[f"eva_{role}"] = waypoint
+        st.session_state[f"eva_{role}_option"] = None
+        # Return to normal navigation after selecting one point.
+        st.session_state.eva_click_mode = "Browse"
+        return
+
+    # Normal mode: clicking a region marker changes the selected region.
+    if is_marker:
+        site_id = site_from_map_event(event, SITES)
+        if site_id is not None and site_id != selected_region:
+            reset_eva_waypoints()
+            st.session_state.region_selector = site_id
+            navigate_to(site_id)
 
 
 with st.sidebar:
@@ -199,6 +272,22 @@ if search_enabled:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             st.sidebar.warning(f"SWIM {depth} target search unavailable: {exc}")
 
+# This catalog is shared by the callbacks for map clicks and dropdowns.
+# SWIM entries appear only when their corresponding ice overlay is enabled.
+if st.session_state.region_selector is not None:
+    st.session_state.eva_catalog = build_waypoint_catalog(
+        SITES[st.session_state.region_selector], search_results
+    )
+else:
+    st.session_state.eva_catalog = {}
+
+# Keep already selected coordinates, but clear any dropdown entry no longer
+# present after changing SWIM depth, threshold or maximum targets.
+for role in ("start", "destination"):
+    key = f"eva_{role}_option"
+    if st.session_state[key] not in st.session_state.eva_catalog:
+        st.session_state[key] = None
+
 map_col, info_col = st.columns([3.6, 1], gap="medium")
 
 with map_col:
@@ -233,6 +322,14 @@ with map_col:
         groups.append(create_ice_target_markers(search_results))
     # Keep region markers above SWIM candidates in the drawing order.
     groups.append(create_site_markers(SITES, st.session_state.region_selector))
+    # EVA waypoints are drawn last so they remain visible above SWIM markers.
+    if st.session_state.region_selector is not None:
+        groups.append(
+            create_waypoint_markers(
+                st.session_state.eva_start,
+                st.session_state.eva_destination,
+            )
+        )
 
     st_folium(
         create_mars_map(),
@@ -243,12 +340,96 @@ with map_col:
         zoom=st.session_state.map_zoom,
         feature_group_to_add=groups,
         returned_objects=[
+            "last_clicked",
             "last_object_clicked",
             "last_object_clicked_tooltip",
             "last_object_clicked_count",
         ],
         on_change=on_marker_click,
     )
+
+    # -------------------------------------------------
+    # EVA WAYPOINT SELECTION — ONLY FOR A SELECTED REGION
+    # -------------------------------------------------
+    if st.session_state.region_selector is not None:
+        st.divider()
+        st.subheader("EVA Route Planning")
+        st.caption(
+            "Define start and destination points. Route optimization "
+            "and terrain safety analysis will be added next."
+        )
+
+        st.radio(
+            "Map click mode",
+            options=["Browse", "Set start", "Set destination"],
+            horizontal=True,
+            key="eva_click_mode",
+            help="Select Set start or Set destination, then click a SWIM marker, "
+                 "region marker, or an empty location on the map. "
+                 "The map returns to Browse after one selection.",
+        )
+
+        start_col, end_col = st.columns(2, gap="medium")
+        catalog = st.session_state.eva_catalog
+        choices = [None, *catalog.keys()]
+
+        with start_col:
+            st.markdown("**Start point**")
+            st.selectbox(
+                "Choose start marker",
+                options=choices,
+                format_func=lambda code: catalog[code]["label"] if code else "Select an available marker",
+                key="eva_start_option",
+                on_change=on_eva_point_change,
+                args=("start",),
+            )
+            start = st.session_state.eva_start
+            if start:
+                st.success(
+                    f'{start["label"]}\n\n'
+                    f'Lat {start["lat"]:.5f}° · Lon {start["lon"]:.5f}°'
+                )
+                st.button(
+                    "Clear start", key="eva_clear_start",
+                    on_click=clear_eva_point, args=("start",),
+                )
+            else:
+                st.caption("No start point selected.")
+
+        with end_col:
+            st.markdown("**Destination**")
+            st.selectbox(
+                "Choose destination marker",
+                options=choices,
+                format_func=lambda code: catalog[code]["label"] if code else "Select an available marker",
+                key="eva_destination_option",
+                on_change=on_eva_point_change,
+                args=("destination",),
+            )
+            destination = st.session_state.eva_destination
+            if destination:
+                st.success(
+                    f'{destination["label"]}\n\n'
+                    f'Lat {destination["lat"]:.5f}° · Lon {destination["lon"]:.5f}°'
+                )
+                st.button(
+                    "Clear destination", key="eva_clear_destination",
+                    on_click=clear_eva_point, args=("destination",),
+                )
+            else:
+                st.caption("No destination selected.")
+
+        if start is not None and destination is not None:
+            distance = straight_line_distance_km(start, destination)
+            if distance < 0.005:
+                st.warning("Start and destination must be different points.")
+            else:
+                st.metric("Straight-line distance (reference)", f"{distance:.2f} km")
+                st.caption(
+                    "Great-circle distance only. No route has been calculated; "
+                    "slopes, surface hazards, elevation and EVA constraints "
+                    "have not been evaluated."
+                )
 
 with info_col:
     st.subheader("Region")
