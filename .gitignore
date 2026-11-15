@@ -8,8 +8,25 @@ __pycache__/
 # VS Code
 .vscode/
 
-# NASA original datasets
-data/raw/
+# ==========================================
+# SCIENTIFIC DATA
+# ==========================================
+
+# MOLA — Large elevation datasets
+/data/raw/mola/
+/data/regions/arcadia_planitia/elevation.npz
+
+# SWIM4MIM — Include scientific datasets
+!/data/
+!/data/raw/
+!/data/raw/swim/
+!/data/raw/swim/manifest.json
+!/data/raw/swim/swim_Ci_0_1.i8
+!/data/raw/swim/swim_Ci_1_5.i8
+
+# Geographic locations
+!/data/locations/
+!/data/locations/*.json
 
 # Temporary processing files
 data/processed/

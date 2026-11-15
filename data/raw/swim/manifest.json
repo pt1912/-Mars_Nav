@@ -1,0 +1,93 @@
+{
+  "source": {
+    "swim": "SWIM4MIM composite ice consistency (Ci), Planetary Science Institute, swim.psi.edu",
+    "caves": "Mars Global Cave Candidate Catalog v1 (Cushing), USGS Astrogeology"
+  },
+  "swim": {
+    "Ci_0_1": {
+      "tiles": [
+        {
+          "file": "swim_Ci_0_1_0.png",
+          "xmin": -180,
+          "xmax": -90,
+          "ymin": -60,
+          "ymax": 60
+        },
+        {
+          "file": "swim_Ci_0_1_1.png",
+          "xmin": -90,
+          "xmax": 0,
+          "ymin": -60,
+          "ymax": 60
+        },
+        {
+          "file": "swim_Ci_0_1_2.png",
+          "xmin": 0,
+          "xmax": 90,
+          "ymin": -60,
+          "ymax": 60
+        },
+        {
+          "file": "swim_Ci_0_1_3.png",
+          "xmin": 90,
+          "xmax": 180,
+          "ymin": -60,
+          "ymax": 60
+        }
+      ],
+      "grid": {
+        "file": "swim_Ci_0_1.i8",
+        "width": 1800,
+        "height": 600,
+        "xmin": -180,
+        "ymax": 60,
+        "res": 0.2,
+        "scale": 0.01,
+        "nodata": -128
+      }
+    },
+    "Ci_1_5": {
+      "tiles": [
+        {
+          "file": "swim_Ci_1_5_0.png",
+          "xmin": -180,
+          "xmax": -90,
+          "ymin": -60,
+          "ymax": 60
+        },
+        {
+          "file": "swim_Ci_1_5_1.png",
+          "xmin": -90,
+          "xmax": 0,
+          "ymin": -60,
+          "ymax": 60
+        },
+        {
+          "file": "swim_Ci_1_5_2.png",
+          "xmin": 0,
+          "xmax": 90,
+          "ymin": -60,
+          "ymax": 60
+        },
+        {
+          "file": "swim_Ci_1_5_3.png",
+          "xmin": 90,
+          "xmax": 180,
+          "ymin": -60,
+          "ymax": 60
+        }
+      ],
+      "grid": {
+        "file": "swim_Ci_1_5.i8",
+        "width": 1800,
+        "height": 600,
+        "xmin": -180,
+        "ymax": 60,
+        "res": 0.2,
+        "scale": 0.01,
+        "nodata": -128
+      }
+    }
+  },
+  "caves": 1062
+}
