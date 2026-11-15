@@ -1,9 +1,7 @@
 import html
 import json
 import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import folium
 import streamlit as st
@@ -12,27 +10,11 @@ from streamlit_folium import st_folium
 from modules.swim_global import load_swim_global
 from modules.ice_targets import find_ice_candidates
 from modules.usgs_overlay import USGSGeologyOverlay
+from modules.nasa_tiles import VIKING_WMTS, MOLA_WMTS, get_ctx_tiles
+from modules.mars_theme import apply_theme
 
 BASE_DIR = Path(__file__).resolve().parent
 SITES_FILE = BASE_DIR / "data" / "locations" / "mars_sites.json"
-
-NASA_TREK_ROOT = "https://trek.nasa.gov/tiles/Mars/EQ"
-VIKING_WMTS = (
-    f"{NASA_TREK_ROOT}/Mars_Viking_MDIM21_ClrMosaic_global_232m/"
-    "1.0.0/default/default028mm/{z}/{y}/{x}.jpg"
-)
-MOLA_WMTS = (
-    f"{NASA_TREK_ROOT}/Mars_MGS_MOLA_ClrShade_merge_global_463m/"
-    "1.0.0/default/default028mm/{z}/{y}/{x}.jpg"
-)
-
-CTX_GLOBAL_ID = "CTX_beta01_uncontrolled_5m_Caltech"
-CTX_REGIONAL_IDS = {
-    "arcadia": "Arcadia_Planitia_CTX_BlockAdj_dd",
-    "jezero": "JEZ_ctx_B_soc_008_orthoMosaic_6m_Eqc_latTs0_lon0",
-    "gale": "Gale_CTX_BlockAdj_dd",
-    "olympus": "olympus_mons.eq",
-}
 
 GLOBAL_ID = "global"
 GLOBAL_CENTER = (0.0, 0.0)
@@ -52,6 +34,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+apply_theme()
 
 
 @st.cache_data(show_spinner=False)
@@ -77,64 +61,6 @@ def load_sites():
             raise ValueError(f"Invalid coordinates for {site_id}")
         sites[site_id] = site
     return sites
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def resolve_ctx_tiles(layer_id):
-    """Resolve the actual URL/extension from NASA's WMTS capabilities."""
-    capabilities = f"{NASA_TREK_ROOT}/{layer_id}/1.0.0/WMTSCapabilities.xml"
-    request = Request(capabilities, headers={"User-Agent": "MarsNav/1.0"})
-    try:
-        with urlopen(request, timeout=8) as response:
-            xml = ET.fromstring(response.read())
-
-        local = lambda tag: tag.rsplit("}", 1)[-1]
-        layer = next(node for node in xml.iter() if local(node.tag) == "Layer")
-        resource = next(
-            node for node in layer.iter()
-            if local(node.tag) == "ResourceURL"
-            and node.get("resourceType") == "tile"
-        )
-        template = resource.get("template")
-        if not template:
-            raise ValueError("Missing WMTS ResourceURL template")
-
-        style = "default"
-        matrix_set = "default028mm"
-        for node in layer.iter():
-            if local(node.tag) == "Style":
-                ident = next((n.text for n in node.iter() if local(n.tag) == "Identifier"), None)
-                if ident:
-                    style = ident
-                break
-        for node in layer.iter():
-            if local(node.tag) == "TileMatrixSetLink":
-                ident = next((n.text for n in node.iter() if local(n.tag) == "TileMatrixSet"), None)
-                if ident:
-                    matrix_set = ident
-                break
-
-        tile_url = template
-        for placeholder, value in {
-            "{Style}": style,
-            "{TileMatrixSet}": matrix_set,
-            "{TileMatrix}": "{z}",
-            "{TileRow}": "{y}",
-            "{TileCol}": "{x}",
-        }.items():
-            tile_url = tile_url.replace(placeholder, value)
-        if not tile_url.startswith("https://") or not all(
-            v in tile_url for v in ("{z}", "{x}", "{y}")
-        ):
-            raise ValueError("Unexpected WMTS URL template")
-        return tile_url, None
-    except (OSError, ValueError, ET.ParseError, StopIteration) as exc:
-        # This is only a fallback. The exact format cannot be verified offline.
-        return (
-            f"{NASA_TREK_ROOT}/{layer_id}/"
-            "1.0.0/default/default028mm/{z}/{y}/{x}.png",
-            str(exc),
-        )
 
 
 SITES = load_sites()
@@ -307,16 +233,16 @@ with map_col:
         ).add_to(mars_map)
 
     if show_ctx:
-        ctx_id = CTX_REGIONAL_IDS.get(region, CTX_GLOBAL_ID)
-        ctx_tiles, ctx_error = resolve_ctx_tiles(ctx_id)
-        folium.TileLayer(
-            tiles=ctx_tiles, name="MRO CTX | imagery",
-            attr=f"NASA Mars Trek / MRO CTX ({ctx_id})",
-            opacity=0.90, overlay=True, control=False, show=True,
-            min_zoom=0, max_zoom=12, max_native_zoom=12, no_wrap=True,
-        ).add_to(mars_map)
+        ctx_tiles, ctx_id, ctx_error = get_ctx_tiles(region)
+        if ctx_tiles:
+            folium.TileLayer(
+                tiles=ctx_tiles, name="MRO CTX | imagery",
+                attr=f"NASA Mars Trek / MRO CTX ({ctx_id})",
+                opacity=0.90, overlay=True, control=False, show=True,
+                min_zoom=0, max_zoom=12, max_native_zoom=12, no_wrap=True,
+            ).add_to(mars_map)
         if ctx_error:
-            st.sidebar.warning("CTX WMTS metadata unavailable; using a fallback tile URL.")
+            st.sidebar.warning(ctx_error)
 
     if show_geology:
         USGSGeologyOverlay(opacity=geology_opacity).add_to(mars_map)

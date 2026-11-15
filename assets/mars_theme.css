@@ -1,0 +1,140 @@
+/* ==========================================
+   ARCADIA ICE EXPLORER
+   Martian Surface Theme
+   ========================================== */
+
+/* MAIN BACKGROUND */
+
+.stApp {
+    background:
+        radial-gradient(
+            ellipse at 90% 8%,
+            rgba(184, 92, 66, 0.12),
+            transparent 45%
+        ),
+        radial-gradient(
+            ellipse at 8% 92%,
+            rgba(196, 126, 83, 0.10),
+            transparent 50%
+        ),
+        linear-gradient(
+            135deg,
+            #FAF7F3 0%,
+            #F8F0E9 55%,
+            #F1E4DA 100%
+        );
+
+    color: #342B28;
+}
+
+/* SIDEBAR */
+
+[data-testid="stSidebar"] {
+    background:
+        linear-gradient(
+            165deg,
+            #F0DDD0 0%,
+            #F5E9DF 55%,
+            #F7F0EA 100%
+        ) !important;
+
+    border-right: 1px solid #D8BDB0;
+}
+
+/* SIDEBAR TEXT */
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label {
+    color: #3B2C27 !important;
+}
+
+/* SIDEBAR WIDGET LABELS */
+
+[data-testid="stSidebar"]
+[data-testid="stWidgetLabel"] p {
+    color: #49352E !important;
+    font-weight: 500;
+}
+
+/* TITLES */
+
+h1 {
+    color: #763D2D !important;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+h2, h3 {
+    color: #884B38 !important;
+    letter-spacing: 0.01em;
+}
+
+/* HEADERS */
+
+[data-testid="stHeader"] {
+    background: transparent;
+}
+
+/* SELECTBOX */
+
+[data-testid="stSidebar"]
+[data-baseweb="select"] > div {
+    background-color: #FFF9F5 !important;
+    border-color: #D9B9A8 !important;
+    color: #342B28 !important;
+}
+
+[data-testid="stSidebar"]
+[data-baseweb="select"] span {
+    color: #342B28 !important;
+}
+
+/* BUTTONS */
+
+[data-testid="stSidebar"] button {
+    border-radius: 7px;
+    border: 1px solid #D1A994;
+    background-color: #FFF9F5;
+    color: #763D2D;
+}
+
+[data-testid="stSidebar"] button:hover {
+    border-color: #B85C42;
+    background-color: #F4DDD0;
+    color: #763D2D;
+}
+
+/* DIVIDERS */
+
+hr {
+    border-color: rgba(155, 91, 67, 0.20);
+}
+
+/* CAPTIONS */
+
+[data-testid="stCaptionContainer"] {
+    color: #71605A;
+}
+
+/* MAP CONTAINER */
+
+iframe {
+    border-radius: 6px;
+}
+
+/* ALERTS */
+
+[data-testid="stAlert"] {
+    border-radius: 8px;
+}
+
+/* SMOOTH TRANSITIONS */
+
+button {
+    transition:
+        background-color 0.2s ease,
+        border-color 0.2s ease;
+}
