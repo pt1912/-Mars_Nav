@@ -149,7 +149,7 @@ if "pending_site" in st.session_state:
         st.session_state.site_selector = pending
         select_site(pending)
 
-st.title("ARCADIA ICE EXPLORER")
+st.title("MARS ICE EXPLORER")
 
 # Sidebar
 with st.sidebar:
