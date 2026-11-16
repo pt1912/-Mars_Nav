@@ -26,6 +26,8 @@ from modules.eva_waypoints import (
 )
 from modules.swim_overlays import create_swim_overlay_group, load_swim_overlay
 from modules.mars_layers import GLOBAL_LAYERS, create_selected_overlays
+from modules.eva_route_ui import render_eva_route_panel, create_eva_route_overlay
+from modules.eva_route_engine import ROUTE_STYLE
 
 
 st.set_page_config(
@@ -53,6 +55,7 @@ for key, default in (
     ("eva_catalog", {}),
     ("eva_last_marker_count", None),
     ("eva_last_map_click", None),
+    ("eva_route_plan", None),
 ):
     if key not in st.session_state:
         st.session_state[key] = default
@@ -64,7 +67,7 @@ def reset_eva_waypoints():
     st.session_state.eva_destination = None
     st.session_state.eva_click_mode = "Browse"
     st.session_state.eva_catalog = {}
-
+    st.session_state.eva_route_plan = None
 
 
 def navigate_to(site_id):
@@ -90,6 +93,7 @@ def on_global_map():
 
 def clear_eva_point(role):
     st.session_state[f"eva_{role}"] = None
+    st.session_state.eva_route_plan = None
 
 
 def on_marker_click():
@@ -114,6 +118,7 @@ def on_marker_click():
             st.session_state.eva_catalog, event, SITES,
         )
         st.session_state[f"eva_{role}"] = waypoint
+        st.session_state.eva_route_plan = None
         # Return to normal navigation after selecting one point.
         st.session_state.eva_click_mode = "Browse"
         return
@@ -288,6 +293,26 @@ with map_col:
         groups.append(create_ice_target_markers(search_results))
     # Keep region markers above SWIM candidates in the drawing order.
     groups.append(create_site_markers(SITES, st.session_state.region_selector))
+    # Computed route alternatives are independent overlays, beneath the endpoints.
+    active_plan = st.session_state.get("eva_route_plan")
+    if (active_plan and st.session_state.region_selector is not None
+            and st.session_state.eva_start and st.session_state.eva_destination
+            and active_plan.get("site_id") == st.session_state.region_selector
+            and active_plan.get("start") == (st.session_state.eva_start["lat"],
+                                             st.session_state.eva_start["lon"])
+            and active_plan.get("destination") == (st.session_state.eva_destination["lat"],
+                                                   st.session_state.eva_destination["lon"])):
+        shown_routes = {
+            name for name in ROUTE_STYLE
+            if st.session_state.get("eva_show_" + name.replace(" ", "_"), True)
+        }
+        groups.append(
+            create_eva_route_overlay(
+                active_plan,
+                show_hazard=bool(st.session_state.get("eva_show_hazard", False)),
+                visible=shown_routes,
+            )
+        )
     # EVA waypoints are drawn last so they remain visible above SWIM markers.
     if st.session_state.region_selector is not None:
         groups.append(
@@ -321,8 +346,8 @@ with map_col:
         st.divider()
         st.subheader("EVA Route Planning")
         st.caption(
-            "Define start and destination points. Route optimization "
-            "and terrain safety analysis will be added next."
+            "Define start and destination points on the map, then calculate "
+            "Shortest, Safest and Balanced routes below."
         )
 
         st.radio(
@@ -385,6 +410,16 @@ with map_col:
                     "The dashed line is a visual connection, not an optimized "
                     "or terrain-safe EVA route."
                 )
+
+# Route scenarios, three A* alternatives, comparison and elevation profiles.
+# Display in the SAME left column directly beneath the map and waypoints.
+with map_col:
+    if st.session_state.region_selector is not None:
+        render_eva_route_panel(
+            st.session_state.region_selector,
+            st.session_state.eva_start,
+            st.session_state.eva_destination,
+        )
 
 with info_col:
     st.subheader("Region")
