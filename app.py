@@ -28,7 +28,6 @@ from modules.swim_overlays import create_swim_overlay_group, load_swim_overlay
 from modules.mars_layers import GLOBAL_LAYERS, create_selected_overlays
 from modules.eva_route_ui import render_eva_route_panel, create_eva_route_overlay
 from modules.eva_route_engine import ROUTE_STYLE
-from modules.dem_coverage import available_dem_coverage, create_dem_coverage_overlay
 
 
 st.set_page_config(
@@ -181,12 +180,6 @@ with st.sidebar:
             key="usgs_opacity",
         )
 
-    # Available MOLA DEM footprints. Original source outlines and prepared
-    # routing cutouts are different: only green cutouts are route-ready.
-    show_dem_coverage = st.checkbox(
-        "DEM coverage (MOLA)", value=True, key="show_dem_coverage"
-    )
-
     # -------------------------------------------------
     # ICE OVERLAYS — SWIM4MIM composite Ci
     # -------------------------------------------------
@@ -270,9 +263,6 @@ if st.session_state.region_selector is not None:
 else:
     st.session_state.eva_catalog = {}
 
-# Read only the NPZ metadata, not the elevation arrays.
-dem_sources, dem_clips, dem_coverage_errors = available_dem_coverage()
-
 map_col, info_col = st.columns([3.6, 1], gap="medium")
 
 with map_col:
@@ -299,8 +289,6 @@ with map_col:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             st.sidebar.error(f"Unable to load SWIM overlay: {exc}")
 
-    if show_dem_coverage:
-        groups.append(create_dem_coverage_overlay(dem_sources, dem_clips))
     if search_results:
         groups.append(create_ice_target_markers(search_results))
     # Keep region markers above SWIM candidates in the drawing order.
@@ -448,20 +436,6 @@ with info_col:
         st.markdown("**Research focus**")
         st.write(site["focus"])
         st.caption(site["reference_note"])
-
-    if show_dem_coverage:
-        st.divider()
-        st.markdown("**DEM Coverage (MOLA)**")
-        st.markdown('<span style="color:#F59E0B">━ ━</span> Original source footprint', unsafe_allow_html=True)
-        st.markdown('<span style="color:#22C55E">■</span> Available regional DEM (.npz)', unsafe_allow_html=True)
-        st.caption(f"{len(dem_clips)} region(s) ready for routing · {len(dem_sources)} source tile(s) known")
-        if dem_clips:
-            st.caption("Ready: " + ", ".join(c['site_name'] for c in dem_clips))
-        else:
-            st.caption("No processed regional DEM found. Run: python scripts/build_mola_regions.py --radius-km 350")
-        for err in dem_coverage_errors:
-            st.warning("DEM metadata unreadable: " + err)
-        st.caption("Amber = original tile extent, not necessarily included in deployment. Green = processed data actually available for route calculations.")
 
     st.divider()
     st.markdown("**Map key**")
