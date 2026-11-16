@@ -8,6 +8,9 @@ from functools import lru_cache
 from urllib.request import Request, urlopen
 import re
 import xml.etree.ElementTree as ET
+import json
+
+from branca.element import MacroElement, Template
 
 import folium
 
@@ -15,6 +18,10 @@ from modules.usgs_overlay import USGSGeologyOverlay
 
 
 NASA_EQ = "https://trek.nasa.gov/tiles/Mars/EQ"
+CTX_GLOBAL_ID = "CTX_beta01_uncontrolled_5m_Caltech"
+CTX_WMTS_ROOT = f"{NASA_EQ}/{CTX_GLOBAL_ID}/1.0.0"
+CTX_WMTS_JPG = f"{CTX_WMTS_ROOT}/default/default028mm/{{z}}/{{y}}/{{x}}.jpg"
+
 
 # (name shown in Leaflet, NASA Mars Trek layer ID, initial opacity, native zoom)
 GLOBAL_LAYERS = (
@@ -45,6 +52,103 @@ def _child_identifier(element):
     return None
 
 
+class _CtxTileFormatFallback(MacroElement):
+    """Browser-side JPG/PNG fallback for NASA's global CTX WMTS.
+
+    This fixes a common silent failure: the WMTS resolver used to assume
+    the global CTX service returned PNG tiles when GetCapabilities could
+    not be fetched. NASA publishes both PNG and JPEG tiles, with a
+    different extension depending on the service.
+
+    Leaflet never contacts Streamlit when a tile format needs a retry,
+    so switching the CTX checkbox does not trigger zoom-related reruns.
+    """
+
+    _template = Template("""
+    {% macro script(this, kwargs) %}
+    (function () {
+        var layer = {{ this.layer_js }};
+        var endpoint = {{ this.endpoint_json }};
+        var capabilitiesUrl = endpoint + "/WMTSCapabilities.xml";
+        var failedTiles = 0;
+        var capabilitiesRequest = null;
+
+        function loadCapabilities() {
+            if (!capabilitiesRequest) {
+                capabilitiesRequest = fetch(capabilitiesUrl, {mode: "cors"})
+                    .then(function(r) {
+                        if (!r.ok) throw new Error("WMTS " + r.status);
+                        return r.text();
+                    });
+            }
+            return capabilitiesRequest;
+        }
+
+        function tileUrl(coords, extension) {
+            return endpoint + "/default/default028mm/" +
+                coords.z + "/" + coords.y + "/" + coords.x + extension;
+        }
+
+        layer.on("tileerror", function(evt) {
+            var tile = evt.tile;
+            var coords = evt.coords;
+            if (!tile || !coords) return;
+            // Keep a retry counter on the image. It persists across
+            // repeated tileerror callbacks, preventing infinite loops.
+            var attempts = Number(tile.dataset.ctxRetry || "0");
+            if (attempts === 0) {
+                tile.dataset.ctxRetry = "1";
+                tile.src = tileUrl(coords, ".png");
+                return;
+            }
+            if (attempts === 1) {
+                tile.dataset.ctxRetry = "2";
+                // Try the exact tile URL advertised by GetCapabilities,
+                // if the server permits browser access to the XML.
+                loadCapabilities()
+                    .then(function(xmlString) {
+                        var xml = new DOMParser().parseFromString(xmlString, "application/xml");
+                        var nodes = xml.getElementsByTagName("*");
+                        for (var j = 0; j < nodes.length; j++) {
+                            var node = nodes[j];
+                            if (node.localName !== "ResourceURL" ||
+                                node.getAttribute("resourceType") !== "tile") continue;
+                            var template = node.getAttribute("template");
+                            if (!template) continue;
+                            var u = template
+                                .replace("{Style}", "default")
+                                .replace("{TileMatrixSet}", "default028mm")
+                                .replace("{TileMatrix}", String(coords.z))
+                                .replace("{TileRow}", String(coords.y))
+                                .replace("{TileCol}", String(coords.x))
+                                .replace("http://", "https://");
+                            if (u.startsWith("https://trek.nasa.gov/")) {
+                                tile.src = u;
+                                return;
+                            }
+                        }
+                        throw new Error("No compatible tile URL in capabilities");
+                    })
+                    .catch(function() {
+                        failedTiles++;
+                        if (failedTiles === 1) {
+                            console.warn("MARS ICE EXPLORER: CTX tiles unavailable; " +
+                                         "check Mars Trek WMTS access in the browser.");
+                        }
+                    });
+            }
+        });
+    })();
+    {% endmacro %}
+    """)
+
+    def __init__(self, layer):
+        super().__init__()
+        self._name = "CtxTileFormatFallback"
+        self.layer_js = layer.get_name()
+        self.endpoint_json = json.dumps(CTX_WMTS_ROOT)
+
+
 @lru_cache(maxsize=40)
 def mars_wmts_url(layer_id):
     """Get the actual png/jpg tile URL from NASA's WMTS capabilities.
@@ -54,6 +158,11 @@ def mars_wmts_url(layer_id):
     """
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", layer_id):
         raise ValueError("Invalid NASA Mars Trek layer ID")
+
+    if layer_id == CTX_GLOBAL_ID:
+        # Do not guess .png on server-side metadata failure. Request JPG
+        # directly; browser-side fallback below handles PNG as well.
+        return CTX_WMTS_JPG
 
     capabilities = f"{NASA_EQ}/{layer_id}/1.0.0/WMTSCapabilities.xml"
     try:
@@ -119,7 +228,7 @@ def create_selected_overlays(*, selected_layers=(), geology=False, geology_opaci
     for name, layer_id, opacity, native_zoom in GLOBAL_LAYERS:
         if layer_id not in selected:
             continue
-        folium.TileLayer(
+        layer = folium.TileLayer(
             tiles=mars_wmts_url(layer_id),
             name=name,
             attr="NASA Mars Trek | MGS / MRO / Mars Odyssey",
@@ -131,7 +240,11 @@ def create_selected_overlays(*, selected_layers=(), geology=False, geology_opaci
             max_zoom=14,
             max_native_zoom=native_zoom,
             no_wrap=True,
-        ).add_to(group)
+        )
+        layer.add_to(group)
+        if layer_id == CTX_GLOBAL_ID:
+            # Fix missing imagery when NASA expects JPG instead of PNG.
+            _CtxTileFormatFallback(layer).add_to(group)
 
     if geology:
         USGSGeologyOverlay(opacity=geology_opacity).add_to(group)
