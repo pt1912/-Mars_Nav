@@ -506,3 +506,36 @@ with info_col:
             "Targets are ranked by SWIM consistency, not EVA safety or "
             "verified ice. Values describe coarse 0.2° raster cells."
         )
+# ==========================
+# MARS_NAV - COPYRIGHT FOOTER
+# ==========================
+
+st.markdown(
+    """
+    <div style="
+        text-align: center;
+        padding: 22px 10px;
+        margin-top: 45px;
+        border-top: 1px solid #344253;
+        color: #91A1B4;
+        font-size: 12px;
+    ">
+        <div style="font-weight: 600; color: #DCE6F0;">
+            © 2026 Mars_Nav. All Rights Reserved.
+        </div>
+        <div style="margin-top: 6px;">
+            Developed by the Mars_Nav Team |
+            NASA Space Apps Challenge 2026
+        </div>
+        <div style="margin-top: 6px;">
+            <a href="https://github.com/pt1912/-Mars_Nav"
+               target="_blank"
+               rel="noopener noreferrer"
+               style="color: #80BEDB; text-decoration: none;">
+                GitHub Repository
+            </a>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
