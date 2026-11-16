@@ -1,0 +1,28 @@
+[
+  {
+    "site": "arcadia",
+    "status": "ready",
+    "file": "arcadia_mola.npz",
+    "partial": true
+  },
+  {
+    "site": "utopia",
+    "status": "missing source DEM"
+  },
+  {
+    "site": "jezero",
+    "status": "missing source DEM"
+  },
+  {
+    "site": "gale",
+    "status": "missing source DEM"
+  },
+  {
+    "site": "valles",
+    "status": "missing source DEM"
+  },
+  {
+    "site": "olympus",
+    "status": "missing source DEM"
+  }
+]

@@ -1,24 +1,42 @@
-# Python
+# ==========================================
+# PYTHON
+# ==========================================
+
 .venv/
 venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# VS Code
+
+# ==========================================
+# DEVELOPMENT
+# ==========================================
+
 .vscode/
+
 
 # ==========================================
 # SCIENTIFIC DATA
 # ==========================================
 
-# MOLA — Large elevation datasets
+# MOLA — Original elevation datasets
+# Large files (IMG, LBL) remain local
 /data/raw/mola/
-/data/regions/arcadia_planitia/elevation.npz
 
-# SWIM4MIM — Include scientific datasets
-!/data/
-!/data/raw/
+# HiRISE — Original terrain datasets
+/data/raw/hirise/
+
+# MOLA — Regional datasets
+# Include regional DEM files for GitHub
+!/data/processed/mola/
+
+# Ignore other temporary processed data
+/data/processed/*
+!/data/processed/mola/
+
+# SWIM4MIM — Scientific datasets
+# Include both depth datasets and metadata
 !/data/raw/swim/
 !/data/raw/swim/manifest.json
 !/data/raw/swim/swim_Ci_0_1.i8
@@ -28,14 +46,21 @@ __pycache__/
 !/data/locations/
 !/data/locations/*.json
 
-# Temporary processing files
-data/processed/
 
-# Credentials
+# ==========================================
+# CREDENTIALS
+# ==========================================
+
 .env
 .env.*
+!.env.example
+
 .streamlit/secrets.toml
 
-# Temporary files
+
+# ==========================================
+# TEMPORARY FILES
+# ==========================================
+
 *.log
 .DS_Store
