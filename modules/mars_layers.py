@@ -1,7 +1,7 @@
-"""Mars Trek scientific overlays and region-specific CTX mosaics.
+"""Mars Trek global scientific overlays and USGS geology.
 
-Scientific overlays are updated dynamically from the left sidebar.
-Changing the overlays does not replace the Viking base map.
+The CTX global image mosaic is selectable under Surface in the sidebar.
+No region-specific CTX imagery or DOM controls are created here.
 """
 
 from functools import lru_cache
@@ -24,6 +24,8 @@ GLOBAL_LAYERS = (
     ("Thermal | THEMIS daytime IR", "THEMIS_DayIR_ControlledMosaics_100m_v2_oct2018", 0.80, 9),
     ("Thermal | THEMIS nighttime IR", "THEMIS_NightIR_ControlledMosaics_100m_v2_oct2018", 0.80, 9),
     ("Thermal | TES thermal inertia", "TES_Thermal_Inertia", 0.75, 7),
+    # CTX is a photographic mosaic (5 m source imagery), NOT an elevation DEM.
+    ("Surface | CTX global mosaic (5 m/px)", "CTX_beta01_uncontrolled_5m_Caltech", 0.96, 13),
     ("Surface | TES albedo", "Mars_MGS_TES_Albedo_mosaic_global_7410m", 0.75, 6),
     ("Dust (historic) | TES dust", "TES_Dust", 0.70, 7),
     ("Dust (historic) | TES dust index", "tes_ruffdust", 0.70, 7),
@@ -31,28 +33,6 @@ GLOBAL_LAYERS = (
     ("Composition | TES plagioclase", "TES_Plagioclase", 0.65, 7),
     ("Composition | TES glass / clay", "TES_Glass_Clay", 0.65, 7),
 )
-
-# Bounding boxes (west, south, east, north): only the local mosaics
-# known to cover the representative point in mars_sites.json.
-CTX_REGIONS = {
-    "arcadia": (
-        "Arcadia Planitia CTX", "Arcadia_Planitia_CTX_BlockAdj_dd",
-        (-173.65, 44.5, -168.75, 47.9),
-    ),
-    "jezero": (
-        "Jezero Controlled CTX", "JEZ_ctx_B_soc_008_orthoMosaic_6m_Eqc_latTs0_lon0",
-        (77.1604655, 18.2110274, 77.6991776, 18.7211945),
-    ),
-    "gale": (
-        "Gale CTX", "Gale_CTX_BlockAdj_dd",
-        (135.1842593, -6.5732988, 139.2413012, -2.8077809),
-    ),
-    "olympus": (
-        "Olympus Mons CTX", "olympus_mons.eq",
-        (-136, 12, -124, 24),
-    ),
-}
-
 
 def _name(tag):
     return tag.rsplit("}", 1)[-1]
@@ -148,7 +128,7 @@ def create_selected_overlays(*, selected_layers=(), geology=False, geology_opaci
             show=True,
             opacity=opacity,
             min_zoom=0,
-            max_zoom=12,
+            max_zoom=14,
             max_native_zoom=native_zoom,
             no_wrap=True,
         ).add_to(group)
@@ -160,35 +140,3 @@ def create_selected_overlays(*, selected_layers=(), geology=False, geology_opaci
 
 
 
-def regional_ctx_info(site_id, sites):
-    """Return a regional mosaic only when it covers the selected marker."""
-    item = CTX_REGIONS.get(site_id)
-    site = sites.get(site_id) if site_id else None
-    if not item or not site:
-        return None
-    label, layer_id, (west, south, east, north) = item
-    if west <= site["lon"] <= east and south <= site["lat"] <= north:
-        return label, layer_id
-    return None
-
-
-def create_regional_ctx_group(site_id, sites):
-    """CTX is added separately, never as a permanent global overlay."""
-    info = regional_ctx_info(site_id, sites)
-    if info is None:
-        return None
-    label, layer_id = info
-    feature_group = folium.FeatureGroup(name=label, control=False)
-    folium.TileLayer(
-        tiles=mars_wmts_url(layer_id),
-        name=label,
-        attr="NASA Mars Trek / MRO CTX",
-        overlay=True,
-        control=False,
-        opacity=0.95,
-        min_zoom=0,
-        max_zoom=12,
-        max_native_zoom=12,
-        no_wrap=True,
-    ).add_to(feature_group)
-    return feature_group

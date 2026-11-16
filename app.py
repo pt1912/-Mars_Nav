@@ -25,12 +25,7 @@ from modules.eva_waypoints import (
     waypoint_from_click,
 )
 from modules.swim_overlays import create_swim_overlay_group, load_swim_overlay
-from modules.mars_layers import (
-    GLOBAL_LAYERS,
-    create_regional_ctx_group,
-    create_selected_overlays,
-    regional_ctx_info,
-)
+from modules.mars_layers import GLOBAL_LAYERS, create_selected_overlays
 
 
 st.set_page_config(
@@ -168,6 +163,8 @@ with st.sidebar:
                 ):
                     selected_layers.append(layer_id)
 
+    # Global CTX now belongs to the Surface category above. No per-region
+    # CTX controls or dynamically loaded regional mosaics are needed.
     show_geology = st.checkbox(
         "USGS SIM 3292 geology", key="show_usgs_geology"
     )
@@ -177,13 +174,6 @@ with st.sidebar:
             "USGS opacity", 0.0, 1.0, 0.35, 0.05,
             key="usgs_opacity",
         )
-
-    ctx_info = regional_ctx_info(st.session_state.region_selector, SITES)
-    show_ctx = False
-    if ctx_info is not None:
-        st.subheader("Regional Imagery")
-        show_ctx = st.checkbox("MRO CTX mosaic", key="show_region_ctx")
-        st.caption(ctx_info[0] + " · limited local coverage")
 
     # -------------------------------------------------
     # ICE OVERLAYS — SWIM4MIM composite Ci
@@ -273,10 +263,6 @@ map_col, info_col = st.columns([3.6, 1], gap="medium")
 with map_col:
     st.subheader("Mars Surface Map")
     groups = []
-    if show_ctx:
-        group = create_regional_ctx_group(st.session_state.region_selector, SITES)
-        if group is not None:
-            groups.append(group)
     groups.append(
         create_selected_overlays(
             selected_layers=selected_layers,

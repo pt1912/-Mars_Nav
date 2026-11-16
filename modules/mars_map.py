@@ -62,7 +62,7 @@ def create_mars_map():
         tiles=None,
         crs="EPSG4326",
         min_zoom=0,
-        max_zoom=12,
+        max_zoom=14,  # Allow closer inspection of global CTX imagery.
         zoom_snap=1,
         zoom_control=True,
         prefer_canvas=True,
@@ -72,7 +72,7 @@ def create_mars_map():
         name="NASA Viking | Mars Global Mosaic",
         attr="NASA Mars Trek / Viking Orbiter / USGS",
         max_native_zoom=7,
-        max_zoom=12,
+        max_zoom=14,  # Allow closer inspection of global CTX imagery.
         no_wrap=True,
         control=False,
     ).add_to(m)
