@@ -23,19 +23,64 @@ def _same_endpoints(plan, site_id, a, b):
                 plan.get('destination') == (b['lat'], b['lon']))
 
 
-def _hazard_overlay(plan):
-    h = plan['hazard']
-    good = np.isfinite(h)
-    t = np.clip(np.nan_to_num(h, nan=0), 0, 1)
-    # Warm hazardous / green low-hazard palette. Invalid pixels fully transparent.
-    rgb = np.empty((*h.shape, 4), dtype=np.uint8)
-    rgb[..., 0] = np.where(t < 0.5, 55 + 310 * t, 210 + 90 * (t - 0.5))
-    rgb[..., 1] = np.where(t < 0.5, 190 - 55 * t, 165 - 320 * (t - 0.5))
-    rgb[..., 2] = np.where(t < 0.5, 85 - 80 * t, 15)
-    rgb[..., 3] = np.where(good, 210, 0)
-    img = Image.fromarray(rgb, mode='RGBA')
-    if max(img.size) > 700:
-        ratio = 700 / max(img.size)
+OVERLAY_CHOICES = (
+    'None',
+    'Slope gradient',
+    'Terrain hazard',
+    'Safest cost proxy',
+    'Balanced cost proxy',
+)
+
+
+def _heat_colors(t):
+    """Scientific-style smooth green-yellow-red gradient for normalized values."""
+    t = np.clip(t, 0, 1)
+    left = t <= .5
+    w = np.where(left, t * 2, (t - .5) * 2)
+    green = np.array([34., 197., 140.])
+    yellow = np.array([250., 204., 21.])
+    red = np.array([239., 68., 68.])
+    out = np.where(left[..., None],
+                   green + w[..., None] * (yellow - green),
+                   yellow + w[..., None] * (red - yellow))
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _terrain_overlay(plan, mode, opacity=.62):
+    if mode == 'None':
+        return None
+    lookup = {
+        'Slope gradient': 'slope_deg',
+        'Terrain hazard': 'hazard',
+        'Safest cost proxy': 'cost_safest',
+        'Balanced cost proxy': 'cost_balanced',
+    }
+    if mode not in lookup:
+        return None
+    x = np.asarray(plan[lookup[mode]], dtype=np.float32)
+    traversable = np.asarray(plan['traversable'], dtype=bool)
+    blocked = np.asarray(plan['blocked'], dtype=bool)
+    drawable = np.isfinite(x) & traversable
+    if mode == 'Slope gradient':
+        lo, hi = 0., max(.1, float(plan['scenario'].get('max_slope_deg', 15.)))
+    elif mode == 'Terrain hazard':
+        lo, hi = 0., 1.
+    else:
+        good = x[drawable]
+        lo, hi = (float(np.percentile(good, 2)), float(np.percentile(good, 98))) if good.size else (0., 1.)
+        if hi - lo < .01:
+            hi = lo + .01
+    scaled = np.clip((np.nan_to_num(x, nan=lo) - lo) / max(hi - lo, 1e-6), 0, 1)
+    rgba = np.zeros((*x.shape, 4), dtype=np.uint8)
+    rgba[..., :3] = _heat_colors(scaled)
+    rgba[..., 3] = np.where(drawable, 220, 0).astype(np.uint8)
+    # Previously, blocked slope cells disappeared under full transparency;
+    # now they are explicitly marked in magenta to explain detours.
+    rgba[blocked, :3] = [153, 38, 101]
+    rgba[blocked, 3] = 235
+    img = Image.fromarray(rgba, mode='RGBA')
+    if max(img.size) > 740:
+        ratio = 740 / max(img.size)
         img = img.resize((max(1, round(img.width * ratio)),
                           max(1, round(img.height * ratio))), resample=Image.Resampling.NEAREST)
     buf = io.BytesIO()
@@ -44,38 +89,45 @@ def _hazard_overlay(plan):
     ppd = float(m['resolution_ppd'])
     north = float(m['north_edge'])
     west = float(m['west_edge_east'])
-    south = north - h.shape[0] / ppd
-    east = west + h.shape[1] / ppd
-    # Planning window is strictly inside a single MOLA tile; geographic wrapping
-    # only for the east-longitude to -180...180 Leaflet convention.
+    south = north - x.shape[0] / ppd
+    east = west + x.shape[1] / ppd
     lon_w = ((west + 180) % 360) - 180
     lon_e = ((east + 180) % 360) - 180
     if lon_w > lon_e:
-        return None  # avoid drawing a bogus dateline-spanning overlay
+        return None  # Antimeridian needs split images, not an invalid global rectangle.
     return folium.raster_layers.ImageOverlay(
-        image='data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii'), bounds=[[south, lon_w], [north, lon_e]],
-        opacity=0.58, name='MOLA terrain hazard (experimental)',
-        interactive=False, cross_origin=False, zindex=6,
+        image='data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii'),
+        bounds=[[south, lon_w], [north, lon_e]],
+        opacity=float(opacity), name=mode,
+        interactive=False, cross_origin=False, zindex=3,
     )
 
 
-def create_eva_route_overlay(plan, show_hazard=False, visible=None):
+def create_eva_route_overlay(plan, overlay_mode='Terrain hazard', opacity=.62,
+                             visible=None, show_hazard=None):
+    """Three routes + selected explanatory raster; accepts legacy show_hazard."""
     group = folium.FeatureGroup(name='EVA Route Alternatives', control=False)
     if not plan:
         return group
-    if show_hazard:
-        hazard = _hazard_overlay(plan)
-        if hazard is not None:
-            hazard.add_to(group)
-    for name, route in plan.get('routes', {}).items():
+    if show_hazard is not None:
+        overlay_mode = 'Terrain hazard' if show_hazard else 'None'
+    raster = _terrain_overlay(plan, overlay_mode, opacity)
+    if raster is not None:
+        raster.add_to(group)
+    # Draw wider paths first. Otherwise the last route obscures other routes
+    # whenever alternatives share the same MOLA cells.
+    for name, stroke in (('Balanced Route', 8), ('Safest Route', 6), ('Shortest Route', 4)):
+        if name not in plan.get('routes', {}):
+            continue
         if visible is not None and name not in visible:
             continue
+        route = plan['routes'][name]
         style = ROUTE_STYLE[name]
         coords = route['coordinates']
         if len(coords) < 2:
             continue
         folium.PolyLine(
-            locations=coords, color=style['color'], weight=5, opacity=0.94,
+            locations=coords, color=style['color'], weight=stroke, opacity=.97,
             dash_array=style['dash'], interactive=False,
             tooltip=f'{name} · {route["stats"]["distance_km"]:.2f} km',
         ).add_to(group)
@@ -215,8 +267,30 @@ def render_eva_route_panel(site_id, start, destination):
     for container, route_name in zip((r1, r2, r3), ROUTE_STYLE):
         with container:
             st.checkbox('Show ' + route_name, value=True, key='eva_show_' + route_name.replace(' ', '_'))
-    st.checkbox('Terrain hazard overlay', value=False, key='eva_show_hazard')
-    st.caption('Map paths use different styles. Activate the terrain hazard layer to examine the DEM-derived cost surface.')
+    st.selectbox('Terrain map overlay', OVERLAY_CHOICES, index=2,
+                 key='eva_overlay_mode',
+                 help='Slope: degrees. Terrain hazard: 0–1. Safest/Balanced: local per-meter cost proxies; uphill direction is not shown by the color alone.')
+    if st.session_state.get('eva_overlay_mode', 'Terrain hazard') != 'None':
+        st.slider('Terrain overlay opacity', .20, .90, .62, .05, key='eva_overlay_opacity')
+        st.markdown('<div style="height:10px;border-radius:4px;'
+                    'background:linear-gradient(90deg,#22c58c 0%,#facc15 50%,#ef4444 100%);">'
+                    '</div>', unsafe_allow_html=True)
+        overlay_name = st.session_state.get('eva_overlay_mode', 'Terrain hazard')
+        if overlay_name == 'Slope gradient':
+            st.caption(f'Slope legend: 0° → {float(plan["scenario"].get("max_slope_deg", 15)):.1f}°.')
+        elif overlay_name == 'Terrain hazard':
+            st.caption('Terrain hazard legend: 0.0 (lower) → 1.0 (higher).')
+        elif overlay_name in ('Safest cost proxy', 'Balanced cost proxy'):
+            k = 'cost_safest' if overlay_name.startswith('Safest') else 'cost_balanced'
+            v = np.asarray(plan[k]); good = v[np.isfinite(v)]
+            if good.size:
+                st.caption(f'Cost gradient: {np.percentile(good, 2):.2f} → '
+                           f'{np.percentile(good, 98):.2f} (relative cost per meter).')
+        st.caption('Green: lower modeled value · Yellow: intermediate · Red: higher · '
+                   'Magenta: blocked / unreliable slope · Transparent: missing DEM.')
+    st.caption('Surface gradients are derived from regional MOLA, not CTX. '
+               'Cost maps explain the spatial trade-offs approximately; directional uphill costs are evaluated by A*. '
+               'Some route segments overlap: use the route visibility switches to compare them individually.')
     if st.button('Focus on route area', key='eva_focus_area'):
         st.session_state.map_center = (
             (float(start['lat']) + float(destination['lat'])) / 2,
@@ -225,9 +299,23 @@ def render_eva_route_panel(site_id, start, destination):
         st.session_state.map_zoom = 7
         st.rerun()
     st.metric('Planning grid resolution', f"~{plan['resolution_m']:.0f} m")
+    offsets = plan.get('endpoint_grid_offset_m', [0, 0])
+    st.caption(f'Route lines are anchored to the EXACT selected start/destination coordinates. '
+               f'Nearest DEM cell centers lie ~{offsets[0]:.0f} m and '
+               f'~{offsets[1]:.0f} m away, respectively; connecting segments are sub-grid approximations.')
     st.caption(f"Search grid: {plan['grid_shape'][0]} × {plan['grid_shape'][1]} cells · "
                f"Valid terrain: {plan['valid_fraction']:.1%} · "
                f"Resampling factor: {plan['stride']}×")
+    old_scenario = plan.get('scenario', {})
+    requested = {
+        'max_slope_deg': max_slope, 'roughness_limit_m': rough_limit,
+        'dust': dust, 'temperature_c': temperature,
+        'illumination': lighting, 'speed_kmh': speed,
+        'max_eva_hours': max_time, 'balanced_risk_weight': balanced_weight,
+    }
+    if any(old_scenario.get(k) != v for k, v in requested.items()):
+        st.warning('Mission/terrain parameters changed since the last calculation. '
+                   'Click Calculate 3 EVA routes to update the map and metrics.')
 
     if plan.get('routes'):
         table = _route_result_table(plan['routes'])

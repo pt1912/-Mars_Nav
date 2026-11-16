@@ -70,25 +70,34 @@ def _coarsen(elev, cell_limit):
     return coarse.astype(np.float32), factor
 
 
-def _neighborhood_std(elevation):
+def _neighborhood_std(elevation, dx_m=1.0, dy_m=1.0):
+    """3x3 detrended roughness in meters, excluding the locally planar slope.
+
+    The old standard deviation of absolute elevation overestimated roughness on
+    perfectly smooth sloping surfaces, double-counting slope in the hazard map.
+    A missing neighbor invalidates the local roughness estimate.
+    """
     valid = np.isfinite(elevation)
-    x = np.where(valid, elevation, 0).astype('float64')
-    x2 = x * x
-    padded = np.pad(x, 1, mode='edge')
-    padded2 = np.pad(x2, 1, mode='edge')
-    pvalid = np.pad(valid.astype('float64'), 1, mode='edge')
-    h, w = x.shape
-    total = np.zeros((h, w), dtype='float64')
-    squares = np.zeros((h, w), dtype='float64')
-    count = np.zeros((h, w), dtype='float64')
-    for dr in range(3):
-        for dc in range(3):
-            total += padded[dr:dr + h, dc:dc + w]
-            squares += padded2[dr:dr + h, dc:dc + w]
-            count += pvalid[dr:dr + h, dc:dc + w]
-    mean = total / np.maximum(count, 1)
-    std = np.sqrt(np.maximum(squares / np.maximum(count, 1) - mean * mean, 0))
-    std[~valid | (count < 9)] = np.nan
+    with np.errstate(invalid='ignore'):
+        gy, gx = np.gradient(elevation, dy_m, dx_m)
+    h, w = elevation.shape
+    filled = np.where(valid, elevation, 0.0).astype(np.float64)
+    padded = np.pad(filled, 1, mode='edge')
+    padded_valid = np.pad(valid.astype(np.float64), 1, mode='edge')
+    sum_resid = np.zeros((h, w), dtype=np.float64)
+    sum_resid2 = np.zeros((h, w), dtype=np.float64)
+    count = np.zeros((h, w), dtype=np.float64)
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            neig = padded[dr + 1:dr + 1 + h, dc + 1:dc + 1 + w]
+            ok = padded_valid[dr + 1:dr + 1 + h, dc + 1:dc + 1 + w]
+            resid = np.where(ok > 0, neig - (gy * dr * dy_m + gx * dc * dx_m), 0.0)
+            sum_resid += np.nan_to_num(resid, nan=0)
+            sum_resid2 += np.nan_to_num(resid * resid, nan=0)
+            count += ok
+    mean = sum_resid / np.maximum(count, 1)
+    std = np.sqrt(np.maximum(sum_resid2 / np.maximum(count, 1) - mean * mean, 0))
+    std[~valid | (count < 9) | ~np.isfinite(gy) | ~np.isfinite(gx)] = np.nan
     return std.astype(np.float32)
 
 
@@ -98,7 +107,7 @@ def terrain_maps(elevation, dx_m, dy_m, max_slope_deg, roughness_limit_m):
     with np.errstate(invalid='ignore', divide='ignore'):
         row_grad, col_grad = np.gradient(elevation, dy_m, dx_m)
         slope = np.degrees(np.arctan(np.hypot(row_grad, col_grad)))
-        rough = _neighborhood_std(elevation)
+        rough = _neighborhood_std(elevation, dx_m, dy_m)
     traversable = finite & np.isfinite(slope) & np.isfinite(rough)
     traversable &= slope <= max_slope_deg
     terrain_risk = (
@@ -115,6 +124,40 @@ def _ambient_scenario(config):
     # This is a dimensionless scenario exposure factor, not physical NASA data.
     cold = min(1.0, max(0.0, (-config.temperature_c - 50.0) / 70.0))
     return min(1.0, 0.10 + 0.22 * dust + 0.15 * light + 0.18 * cold), dust, light
+
+
+def _great_circle_m(a, b):
+    """Martian spherical surface distance for clicked point / cell center links."""
+    lat1, lon1 = map(math.radians, a)
+    lat2, lon2 = map(math.radians, b)
+    dl = lat2 - lat1
+    dn = (lon2 - lon1 + math.pi) % (2 * math.pi) - math.pi
+    h = math.sin(dl / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dn / 2) ** 2
+    return 2 * MARS_RADIUS_M * math.asin(math.sqrt(max(0, min(1, h))))
+
+
+def cost_surface(slope, rough, risk, valid, config: RouteSettings, strategy: str):
+    """Visual *per-meter cost proxy* for explaining route choices.
+
+    Unlike A*, this map cannot represent direction-specific uphill cost;
+    it is labeled as a proxy, not an exact per-edge cost.
+    """
+    env, dust, light = _ambient_scenario(config)
+    local_rough = np.clip(np.nan_to_num(rough, nan=0) / max(config.roughness_limit_m, 0.1), 0, 2)
+    model_time = 1 + .35 * local_rough + .12 * light + .08 * dust
+    grade = np.clip(np.tan(np.radians(np.nan_to_num(slope, nan=0))), 0, 2)
+    effort = np.clip(.7 * grade + .3 * local_rough, 0, 3)
+    if strategy == 'Shortest Route':
+        out = np.ones_like(slope, dtype=np.float32)
+    elif strategy == 'Safest Route':
+        out = (.20 + 3.6 * np.nan_to_num(risk, nan=0) + .85 * env * model_time).astype(np.float32)
+    elif strategy == 'Balanced Route':
+        out = (.72 + config.balanced_risk_weight * 1.4 * np.nan_to_num(risk, nan=0)
+               + .55 * effort + .70 * env * model_time).astype(np.float32)
+    else:
+        raise ValueError(f'Unknown route strategy: {strategy}')
+    out[~valid] = np.nan
+    return out
 
 
 def _a_star(elev, hazard, rough, valid, sr, sc, tr, tc, dx, dy, config, strategy):
@@ -224,6 +267,27 @@ def _route_stats(path, elevation, slope, rough, hazard, dx, dy, config):
                 elevation_profile_m=heights[::max(1, len(heights)//300)].astype(float).tolist())
 
 
+def _add_endpoint_links(stats, extra_m, config):
+    """Report travel all the way to the clicked coordinates, not grid centers.
+
+    Connector segments are sub-grid approximations. Their slope cannot be
+    determined at cell resolution; their ground distance and nominal time
+    are included consistently for all three strategies.
+    """
+    if extra_m <= 0:
+        return stats
+    extra_km = extra_m / 1000.0
+    env, dust, light = _ambient_scenario(config)
+    extra_hours = extra_km / config.speed_kmh * (1 + .12 * light + .08 * dust)
+    stats['distance_km'] = round(stats['distance_km'] + extra_km, 3)
+    stats['duration_hours'] = round(stats['duration_hours'] + extra_hours, 2)
+    stats['environmental_exposure_index_hours'] = round(
+        stats['environmental_exposure_index_hours'] + env * extra_hours, 2)
+    stats['effort_proxy'] = round(stats['effort_proxy'] + extra_km, 2)
+    stats['within_eva_time'] = bool(stats['duration_hours'] <= config.max_eva_hours)
+    return stats
+
+
 def plan_eva_routes(site_id, start, destination, config: RouteSettings, output_dir=None):
     """Return three paths and hazard map based on only a small local DEM window."""
     if config.max_slope_deg <= 0 or config.speed_kmh <= 0:
@@ -253,16 +317,29 @@ def plan_eva_routes(site_id, start, destination, config: RouteSettings, output_d
     meta['resolution_ppd'] = float(source['resolution_ppd']) / factor
     results = {}
     errors = {}
+    exact_start = (float(start['lat']), float(start['lon']))
+    exact_end = (float(destination['lat']), float(destination['lon']))
+    start_center = grid_lat_lon(*start_rc, meta)
+    end_center = grid_lat_lon(*end_rc, meta)
+    start_offset_m = _great_circle_m(exact_start, start_center)
+    end_offset_m = _great_circle_m(exact_end, end_center)
+    connector_m = start_offset_m + end_offset_m
     for name in ROUTE_STYLE:
         try:
             path, cost, expanded = _a_star(grid, risk, rough, traversable,
                                             *start_rc, *end_rc, dx, dy, config, name)
             stats = _route_stats(path, grid, slope, rough, risk, dx, dy, config)
-            # At coarse resolutions, the path points are analysis cell centers.
+            # The raster search starts at a cell center, but the user DID NOT
+            # select that center. Always draw exactly the clicked endpoints.
             positions = [grid_lat_lon(int(r), int(c), meta) for r, c in path]
+            positions = [exact_start, *positions, exact_end]
+            _add_endpoint_links(stats, connector_m, config)
             results[name] = {
                 'name': name, 'stats': stats, 'cost': round(cost, 2),
                 'expanded_cells': expanded, 'coordinates': positions,
+                'start_cell_center': start_center,
+                'destination_cell_center': end_center,
+                'endpoint_grid_offset_m': [round(start_offset_m, 1), round(end_offset_m, 1)],
             }
         except (ValueError, RuntimeError) as exc:
             errors[name] = str(exc)
@@ -273,8 +350,18 @@ def plan_eva_routes(site_id, start, destination, config: RouteSettings, output_d
         'valid_fraction': float(np.mean(traversable)),
         'scenario': {'dust': config.dust, 'temperature_c': config.temperature_c,
                      'illumination': config.illumination, 'speed_kmh': config.speed_kmh,
-                     'max_eva_hours': config.max_eva_hours},
-        'hazard': risk, 'map_metadata': meta,
+                     'max_eva_hours': config.max_eva_hours,
+                     'max_slope_deg': config.max_slope_deg,
+                     'roughness_limit_m': config.roughness_limit_m,
+                     'map_margin_km': config.map_margin_km,
+                     'balanced_risk_weight': config.balanced_risk_weight},
+        'hazard': risk, 'slope_deg': slope, 'roughness_m': rough,
+        'traversable': traversable,
+        'blocked': np.isfinite(grid) & ~traversable,
+        'cost_safest': cost_surface(slope, rough, risk, traversable, config, 'Safest Route'),
+        'cost_balanced': cost_surface(slope, rough, risk, traversable, config, 'Balanced Route'),
+        'endpoint_grid_offset_m': [round(start_offset_m, 1), round(end_offset_m, 1)],
+        'map_metadata': meta,
         'summary': {
             'mean_slope_deg': round(float(np.nanmean(slope)), 2),
             'max_slope_deg': round(float(np.nanmax(slope)), 2),
